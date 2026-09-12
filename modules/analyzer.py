@@ -41,7 +41,7 @@ class ReelAnalyzer:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.6-flash",
         embedding_model: str = "models/gemini-embedding-001",
         embedding_dim: int = 768
     ):
@@ -86,4 +86,10 @@ class ReelAnalyzer:
             model=self.embedding_model,
             contents=text
         )
-        return list(response.embedding.values[:self.embedding_dim])
+        if getattr(response, "embeddings", None):
+            values = response.embeddings[0].values
+        elif getattr(response, "embedding", None):
+            values = response.embedding.values
+        else:
+            values = getattr(response, "values", [])
+        return list(values[:self.embedding_dim])

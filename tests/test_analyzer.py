@@ -35,7 +35,9 @@ def test_generate_embedding_dim_slicing():
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_embed_resp = MagicMock()
-        # Suppose model returns 1000 dims
+        mock_embed_item = MagicMock()
+        mock_embed_item.values = [0.1] * 1000
+        mock_embed_resp.embeddings = [mock_embed_item]
         mock_embed_resp.embedding.values = [0.1] * 1000
         mock_client.models.embed_content.return_value = mock_embed_resp
 

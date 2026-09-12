@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     ALLOWED_TELEGRAM_USERS: str = ""
     
     # Gemini Models
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MODEL: str = "gemini-3.6-flash"
     EMBEDDING_MODEL: str = "models/gemini-embedding-001"
     EMBEDDING_DIM: int = 768
 
