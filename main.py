@@ -184,22 +184,39 @@ async def handle_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: ActionHandler, settings: Settings) -> None:
     pipeline.startup_recovery()
-    app = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build()
     
-    scheduler = SchedulerService(
-        db=pipeline.db,
-        bot=app.bot,
-        chat_id=settings.TELEGRAM_GROUP_CHAT_ID,
-        pipeline=pipeline,
-        canary_url=settings.CANARY_REEL_URL
+    scheduler_holder: dict[str, SchedulerService | None] = {"service": None}
+
+    async def post_init(application) -> None:
+        scheduler = SchedulerService(
+            db=pipeline.db,
+            bot=application.bot,
+            chat_id=settings.TELEGRAM_GROUP_CHAT_ID,
+            pipeline=pipeline,
+            canary_url=settings.CANARY_REEL_URL
+        )
+        scheduler.start()
+        scheduler_holder["service"] = scheduler
+        application.bot_data["scheduler"] = scheduler
+        logger.info("Scheduler started successfully inside event loop.")
+
+    async def post_shutdown(application) -> None:
+        if scheduler_holder["service"]:
+            scheduler_holder["service"].shutdown()
+            logger.info("Scheduler stopped cleanly.")
+
+    app = (
+        ApplicationBuilder()
+        .token(settings.TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
     )
-    scheduler.start()
 
     app.bot_data["pipeline"] = pipeline
     app.bot_data["search_engine"] = search_engine
     app.bot_data["actions"] = actions
     app.bot_data["settings"] = settings
-    app.bot_data["scheduler"] = scheduler
 
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("canary", handle_canary))
