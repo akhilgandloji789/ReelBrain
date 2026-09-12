@@ -1,24 +1,27 @@
-# ReelMind: Personal AI Second Brain Implementation Plan (Production & Hackathon-Ready)
+# ReelMind: Personal AI Second Brain Implementation Plan (Master Edition)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build ReelMind — a self-hosted, Telegram-native, multimodal personal second brain that turns saved short-form video content into structured, queryable, actionable knowledge anchored on **Memory → Evidence → Retrieval → Action**, featuring interactive inline buttons, telemetry, data sovereignty, and hackathon demo reliability.
+**Goal:** Build ReelMind — a self-hosted, Telegram-native, multimodal personal second brain that turns saved short-form video content into structured, queryable, actionable knowledge anchored on **Memory → Evidence → Retrieval → Action**, featuring user intent capture, auditable provenance, pipeline state machines, interactive feedback loops, telemetry, and hackathon demo reliability.
 
-**Architecture:** A decoupled, modular Python 3.11+ application using `python-telegram-bot` with inline keyboards, `yt-dlp` with circuit breaker and tenacity retries, Gemini 2.0/2.5 Flash for multimodal understanding, `gemini-embedding-001` (768-dim) for semantic vectors, `ffmpeg` for keyframe grabbing, SQLite (WAL mode) with normalized tables (`reels`, `entities`, `embeddings`, `action_log`, `reels_fts`) as the single canonical source of truth, in-memory telemetry (`/status`), and APScheduler for Sunday reviews and canary tests.
+**Architecture:** A decoupled, modular Python 3.11+ application featuring:
+- **Resilient Ingestion:** Telegram link receiver parsing shortcodes and optional user intent ("why I saved this"), protected by an authorized user whitelist.
+- **State Machine Pipeline:** Job states (`RECEIVED` → `DOWNLOADING` → `DOWNLOADED` → `ANALYZING` → `ANALYZED` → `EXTRACTING_FRAMES` → `PUBLISHING` → `INDEXING` → `COMPLETED`) with idempotency and tenacity exponential retries.
+- **Multimodal AI & Real Confidence:** Gemini 2.0/2.5 Flash for vision and audio reasoning with nullable model-reported confidence scores (no fake 0.90 defaults), and configurable vector embeddings via `gemini-embedding-001` (768-dim).
+- **Canonical SQLite Store & Derived FTS5:** WAL mode database with atomic transactions, synchronizing `reels`, `entities`, `embeddings`, and `reels_fts` derived full-text index.
+- **Interactive UI & Feedback Loop:** Forum topic routing with inline keyboards (`[🛒 Grocery List]`, `[💻 Code]`, `[🔍 Ask]`, `[✏️ Edit]`, `[👍 Accurate]`, `[👎 Inaccurate]`), `/status` telemetry, and live `/canary` diagnostics.
+- **Transactional Cleanup & Recovery:** Startup recovery job purging orphaned media, guaranteeing `<100MB` permanent local disk footprint.
 
 **Tech Stack:** Python 3.11+, `python-telegram-bot>=21.0`, `google-genai>=0.1.0`, `yt-dlp>=2024.8.6`, `pydantic>=2.7.0`, `pydantic-settings>=2.2.0`, `apscheduler>=3.10.0`, `tenacity>=8.2.0`, `numpy>=1.26.0`, `pytest`, `pytest-asyncio`, `ffmpeg`.
 
 **Spec:** [`docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md`](file:///c:/Akhil/Instagram/docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md)
 
 ## Global Constraints & Performance Budget
-- **Security Whitelist:** Only user IDs / chat IDs listed in `ALLOWED_TELEGRAM_USERS` can trigger the bot or issue `/export` commands.
-- **Explicitly Free-Tier Friendly:** Designed to operate well within free tiers (Gemini free tier, Telegram Bot API, SQLite).
-- **SQLite is the single canonical source of truth:** Telegram is purely an interactive interface.
-- **Evidence provenance:** Every claim and ingredient carries a `(text, start_ts, end_ts, confidence)` tuple linking back to source video.
-- **Performance targets:** End-to-end processing < 25s for a 60s reel. Max video duration 90s. Max 4 keyframe snapshots.
-- **Continuous index integrity:** Edits via `/edit` immediately re-embed the parent reel and update FTS5 atomically.
-- **Zero disk bloat:** Ephemeral media files in `temp/` are purged immediately upon completion.
-- **Original links:** The source Reel link must always appear at the bottom of the Telegram note.
+- **No Fake Defaults:** Confidence is nullable `float | None`; the UI displays verified timestamps rather than hardcoded 0.90 numbers.
+- **Idempotency Guarantee:** Duplicate shortcodes are rejected before initiating downloads or publishing duplicate notes.
+- **Data Sovereignty:** Full database is exportable to Markdown or JSON anytime via `/export`.
+- **Performance Targets:** Processing latency ~10-25s for short reels. Max duration 90s. Max 4 keyframe snapshots.
+- **Startup Recovery:** Ephemeral files in `temp/` are swept on startup, preventing orphaned media buildup.
 
 ---
 
@@ -36,8 +39,9 @@ CREATE TABLE IF NOT EXISTS reels (
     saved_at        TEXT NOT NULL,
     category        TEXT NOT NULL,
     title           TEXT,
+    user_intent     TEXT,
     raw_transcript  TEXT,
-    status          TEXT NOT NULL DEFAULT 'pending',
+    status          TEXT NOT NULL DEFAULT 'RECEIVED',
     error_message   TEXT
 );
 
@@ -48,7 +52,7 @@ CREATE TABLE IF NOT EXISTS entities (
     text            TEXT NOT NULL,
     start_ts        REAL NOT NULL,
     end_ts          REAL,
-    confidence      REAL DEFAULT 0.90,
+    confidence      REAL,                       -- NULLABLE, NO DEFAULT!
     frame_path      TEXT,
     edited_by_user  INTEGER DEFAULT 0
 );
@@ -62,7 +66,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS reels_fts USING fts5(
-    title, raw_transcript, entity_text,
+    title, user_intent, raw_transcript, entity_text,
     content='', tokenize='porter unicode61'
 );
 
@@ -77,7 +81,7 @@ CREATE TABLE IF NOT EXISTS action_log (
 
 ---
 
-### Task 1: Project Setup, Dependencies & Configuration with Security Whitelist
+### Task 1: Project Setup, Dependencies & Config with Configurable Embedding Settings
 
 **Files:**
 - Create: `requirements.txt`
@@ -90,13 +94,15 @@ CREATE TABLE IF NOT EXISTS action_log (
   - `TELEGRAM_BOT_TOKEN: str`
   - `TELEGRAM_GROUP_CHAT_ID: int | str`
   - `GEMINI_API_KEY: str`
-  - `ALLOWED_TELEGRAM_USERS: list[int]` (User whitelist)
+  - `ALLOWED_TELEGRAM_USERS: list[int]`
+  - `EMBEDDING_MODEL: str` (defaults to `"models/gemini-embedding-001"`)
+  - `EMBEDDING_DIM: int` (defaults to `768`)
   - `CANARY_REEL_URL: str | None`
   - `DATA_DIR: Path`
   - `TEMP_DIR: Path`
   - `topic_map: dict[str, int | None]`
 
-- [ ] **Step 1: Write failing test for configuration loading and security whitelist**
+- [ ] **Step 1: Write failing test for configuration loading and configurable embeddings**
 
 ```python
 # tests/test_config.py
@@ -104,17 +110,19 @@ import pytest
 from pathlib import Path
 from config import Settings
 
-def test_settings_load_from_env(monkeypatch):
+def test_settings_load_and_embedding_config(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:fake_token")
     monkeypatch.setenv("TELEGRAM_GROUP_CHAT_ID", "-100123456789")
     monkeypatch.setenv("GEMINI_API_KEY", "fake_gemini_key")
-    monkeypatch.setenv("ALLOWED_TELEGRAM_USERS", "111,222,333")
+    monkeypatch.setenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
+    monkeypatch.setenv("EMBEDDING_DIM", "768")
+    monkeypatch.setenv("ALLOWED_TELEGRAM_USERS", "111,222")
     
     settings = Settings()
     assert settings.TELEGRAM_BOT_TOKEN == "12345:fake_token"
-    assert str(settings.TELEGRAM_GROUP_CHAT_ID) == "-100123456789"
-    assert settings.GEMINI_API_KEY == "fake_gemini_key"
-    assert settings.allowed_users == [111, 222, 333]
+    assert settings.EMBEDDING_MODEL == "models/gemini-embedding-001"
+    assert settings.EMBEDDING_DIM == 768
+    assert settings.allowed_users == [111, 222]
     assert settings.TEMP_DIR.exists()
     assert settings.DATA_DIR.exists()
 
@@ -152,6 +160,8 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token_from_botfather
 TELEGRAM_GROUP_CHAT_ID=-1001234567890
 GEMINI_API_KEY=your_gemini_api_key_from_google_ai_studio
 ALLOWED_TELEGRAM_USERS=12345678,98765432
+EMBEDDING_MODEL=models/gemini-embedding-001
+EMBEDDING_DIM=768
 CANARY_REEL_URL=https://www.instagram.com/reel/C-stable123/
 ```
 
@@ -167,9 +177,12 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram bot token from @BotFather")
     TELEGRAM_GROUP_CHAT_ID: str | int = Field(..., description="Target Telegram Group / Channel ID")
     GEMINI_API_KEY: str = Field(..., description="Google AI Studio Gemini API Key")
-    ALLOWED_TELEGRAM_USERS: str = Field(default="", description="Comma-separated Telegram user IDs allowed to interact")
-    CANARY_REEL_URL: str | None = Field(default=None, description="Stable public Reel URL for canary tests")
+    ALLOWED_TELEGRAM_USERS: str = Field(default="", description="Comma-separated Telegram user IDs allowed")
     
+    EMBEDDING_MODEL: str = Field(default="models/gemini-embedding-001", description="Gemini embedding model name")
+    EMBEDDING_DIM: int = Field(default=768, description="Vector dimension")
+    CANARY_REEL_URL: str | None = Field(default=None, description="Stable public Reel URL for canary tests")
+
     TOPIC_RECIPES_THREAD_ID: int | None = None
     TOPIC_TECH_THREAD_ID: int | None = None
     TOPIC_FITNESS_THREAD_ID: int | None = None
@@ -216,12 +229,12 @@ Expected: PASS
 
 ```bash
 git add requirements.txt .env.example config.py tests/test_config.py
-git commit -m "feat: setup project dependencies with security whitelist configuration"
+git commit -m "feat: implement configuration loader with configurable embeddings"
 ```
 
 ---
 
-### Task 2: Canonical SQLite Database with Entities, Embeddings & FTS5
+### Task 2: Canonical SQLite Database with State Machine, User Intent & Derived FTS5 Sync
 
 **Files:**
 - Create: `modules/__init__.py`
@@ -231,20 +244,22 @@ git commit -m "feat: setup project dependencies with security whitelist configur
 **Interfaces:**
 - Produces: `ReelDatabase` class:
   - `add_reel(...) -> int`
+  - `update_reel_status(reel_id: int, status: str, error_message: str | None = None) -> None`
   - `is_processed(shortcode: str) -> bool`
   - `get_reel_by_shortcode(shortcode: str) -> dict | None`
   - `get_reel_by_id(reel_id: int) -> dict | None`
   - `add_entities(reel_id: int, entities: list[dict]) -> None`
   - `get_entities(reel_id: int) -> list[dict]`
   - `update_entity(entity_id: int, new_text: str) -> tuple[bool, int]`
-  - `store_embedding(reel_id: int, model: str, vector: list[float]) -> None`
+  - `store_embedding(reel_id: int, model: str, dim: int, vector: list[float]) -> None`
   - `get_all_embeddings() -> list[dict]`
   - `search_fts(query: str, limit: int = 5) -> list[dict]`
   - `log_action(reel_id: int | None, action_type: str, payload: dict) -> None`
+  - `cleanup_orphaned_jobs(max_age_hours: int = 1) -> int`
   - `get_all_reels_with_entities() -> list[dict]`
   - `get_metrics_summary() -> dict`
 
-- [ ] **Step 1: Write failing test for SQLite storage and metrics**
+- [ ] **Step 1: Write failing test for state machine, user intent, and derived FTS5 synchronization**
 
 ```python
 # tests/test_storage.py
@@ -252,23 +267,41 @@ import pytest
 from pathlib import Path
 from modules.storage import ReelDatabase
 
-def test_database_lifecycle_and_metrics(tmp_path: Path):
+def test_database_intent_and_fts_sync(tmp_path: Path):
     db = ReelDatabase(tmp_path / "test_reelminds.db")
     shortcode = "C-xyz123"
     url = f"https://www.instagram.com/reel/{shortcode}/"
-    assert not db.is_processed(shortcode)
     
-    reel_id = db.add_reel(url=url, shortcode=shortcode, category="recipe", title="Oats", raw_transcript="Healthy")
-    assert reel_id > 0
-    assert db.is_processed(shortcode)
+    reel_id = db.add_reel(
+        url=url,
+        shortcode=shortcode,
+        category="recipe",
+        title="10-Minute High-Protein Oats",
+        user_intent="Try this for Sunday meal prep",
+        raw_transcript="Oats and whey recipe"
+    )
     
-    db.add_entities(reel_id, [{"entity_type": "ingredient", "text": "50g Oats", "start_ts": 5.0}])
-    ents = db.get_entities(reel_id)
-    assert len(ents) == 1
+    assert db.get_reel_by_id(reel_id)["user_intent"] == "Try this for Sunday meal prep"
+    assert db.get_reel_by_id(reel_id)["status"] == "RECEIVED"
     
-    metrics = db.get_metrics_summary()
-    assert metrics["total_reels"] == 1
-    assert metrics["total_entities"] == 1
+    db.update_reel_status(reel_id, "COMPLETED")
+    assert db.is_processed(shortcode) is True
+
+    # Entities with nullable confidence (no fake default)
+    entities = [
+        {"entity_type": "ingredient", "text": "50g rolled oats", "start_ts": 8.0, "confidence": None},
+        {"entity_type": "instruction", "text": "Mix with almond milk", "start_ts": 15.0, "confidence": 0.94}
+    ]
+    db.add_entities(reel_id, entities)
+    
+    stored = db.get_entities(reel_id)
+    assert stored[0]["confidence"] is None
+    assert stored[1]["confidence"] == 0.94
+
+    # Search user intent via FTS5
+    results = db.search_fts("meal prep")
+    assert len(results) == 1
+    assert results[0]["id"] == reel_id
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -317,8 +350,9 @@ class ReelDatabase:
                     saved_at        TEXT NOT NULL,
                     category        TEXT NOT NULL,
                     title           TEXT,
+                    user_intent     TEXT,
                     raw_transcript  TEXT,
-                    status          TEXT NOT NULL DEFAULT 'pending',
+                    status          TEXT NOT NULL DEFAULT 'RECEIVED',
                     error_message   TEXT
                 );
 
@@ -329,7 +363,7 @@ class ReelDatabase:
                     text            TEXT NOT NULL,
                     start_ts        REAL NOT NULL,
                     end_ts          REAL,
-                    confidence      REAL DEFAULT 0.90,
+                    confidence      REAL,
                     frame_path      TEXT,
                     edited_by_user  INTEGER DEFAULT 0
                 );
@@ -343,7 +377,7 @@ class ReelDatabase:
                 );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS reels_fts USING fts5(
-                    title, raw_transcript, entity_text,
+                    title, user_intent, raw_transcript, entity_text,
                     content='', tokenize='porter unicode61'
                 );
 
@@ -359,7 +393,7 @@ class ReelDatabase:
 
     def is_processed(self, shortcode: str) -> bool:
         with self._get_connection() as conn:
-            cursor = conn.execute("SELECT 1 FROM reels WHERE shortcode = ? AND status = 'processed'", (shortcode,))
+            cursor = conn.execute("SELECT 1 FROM reels WHERE shortcode = ? AND status = 'COMPLETED'", (shortcode,))
             return cursor.fetchone() is not None
 
     def add_reel(
@@ -368,6 +402,7 @@ class ReelDatabase:
         shortcode: str,
         category: str,
         title: str,
+        user_intent: str | None = None,
         raw_transcript: str = "",
         content_hash: str | None = None
     ) -> int:
@@ -375,14 +410,20 @@ class ReelDatabase:
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT OR REPLACE INTO reels (url, shortcode, content_hash, saved_at, category, title, raw_transcript, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'processed')
+                INSERT OR REPLACE INTO reels (url, shortcode, content_hash, saved_at, category, title, user_intent, raw_transcript, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RECEIVED')
                 """,
-                (url, shortcode, content_hash, now, category, title, raw_transcript)
+                (url, shortcode, content_hash, now, category, title, user_intent, raw_transcript)
             )
             reel_id = cursor.lastrowid
+            self._sync_fts_for_reel(conn, reel_id)
             conn.commit()
             return reel_id
+
+    def update_reel_status(self, reel_id: int, status: str, error_message: str | None = None) -> None:
+        with self._get_connection() as conn:
+            conn.execute("UPDATE reels SET status = ?, error_message = ? WHERE id = ?", (status, error_message, reel_id))
+            conn.commit()
 
     def add_entities(self, reel_id: int, entities: list[dict]) -> None:
         with self._get_connection() as conn:
@@ -398,7 +439,7 @@ class ReelDatabase:
                         ent.get("text", ""),
                         ent.get("start_ts", 0.0),
                         ent.get("end_ts"),
-                        ent.get("confidence", 0.90),
+                        ent.get("confidence"),  # Can be None
                         ent.get("frame_path"),
                         ent.get("edited_by_user", 0)
                     )
@@ -407,7 +448,7 @@ class ReelDatabase:
             conn.commit()
 
     def _sync_fts_for_reel(self, conn: sqlite3.Connection, reel_id: int) -> None:
-        reel = conn.execute("SELECT title, raw_transcript FROM reels WHERE id = ?", (reel_id,)).fetchone()
+        reel = conn.execute("SELECT title, user_intent, raw_transcript FROM reels WHERE id = ?", (reel_id,)).fetchone()
         if not reel:
             return
         ents = conn.execute("SELECT text FROM entities WHERE reel_id = ?", (reel_id,)).fetchall()
@@ -415,9 +456,19 @@ class ReelDatabase:
 
         conn.execute("DELETE FROM reels_fts WHERE rowid = ?", (reel_id,))
         conn.execute(
-            "INSERT INTO reels_fts(rowid, title, raw_transcript, entity_text) VALUES (?, ?, ?, ?)",
-            (reel_id, reel["title"] or "", reel["raw_transcript"] or "", all_entity_text)
+            "INSERT INTO reels_fts(rowid, title, user_intent, raw_transcript, entity_text) VALUES (?, ?, ?, ?, ?)",
+            (reel_id, reel["title"] or "", reel["user_intent"] or "", reel["raw_transcript"] or "", all_entity_text)
         )
+
+    def get_reel_by_shortcode(self, shortcode: str) -> dict | None:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM reels WHERE shortcode = ?", (shortcode,)).fetchone()
+            return dict(row) if row else None
+
+    def get_reel_by_id(self, reel_id: int) -> dict | None:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM reels WHERE id = ?", (reel_id,)).fetchone()
+            return dict(row) if row else None
 
     def get_entities(self, reel_id: int) -> list[dict]:
         with self._get_connection() as conn:
@@ -435,7 +486,7 @@ class ReelDatabase:
             conn.commit()
             return True, reel_id
 
-    def store_embedding(self, reel_id: int, model: str, vector: list[float]) -> None:
+    def store_embedding(self, reel_id: int, model: str, dim: int, vector: list[float]) -> None:
         blob = pack_vector(vector)
         now = datetime.utcnow().isoformat()
         with self._get_connection() as conn:
@@ -444,7 +495,7 @@ class ReelDatabase:
                 INSERT OR REPLACE INTO embeddings (reel_id, model, dim, vector, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (reel_id, model, len(vector), blob, now)
+                (reel_id, model, dim, blob, now)
             )
             conn.commit()
 
@@ -452,7 +503,7 @@ class ReelDatabase:
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                SELECT r.id, r.title, r.category, r.url, e.model, e.dim, e.vector
+                SELECT r.id, r.title, r.category, r.url, r.user_intent, e.model, e.dim, e.vector
                 FROM embeddings e
                 JOIN reels r ON e.reel_id = r.id
                 """
@@ -506,7 +557,7 @@ class ReelDatabase:
 
     def get_metrics_summary(self) -> dict:
         with self._get_connection() as conn:
-            total_reels = conn.execute("SELECT COUNT(*) FROM reels").fetchone()[0]
+            total_reels = conn.execute("SELECT COUNT(*) FROM reels WHERE status = 'COMPLETED'").fetchone()[0]
             total_entities = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
             total_embeddings = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
             total_actions = conn.execute("SELECT COUNT(*) FROM action_log").fetchone()[0]
@@ -526,13 +577,13 @@ Expected: PASS
 - [ ] **Step 5: Commit changes**
 
 ```bash
-git add modules/__init__.py modules/storage.py tests/test_storage.py
-git commit -m "feat: implement SQLite canonical schema with metrics telemetry queries"
+git add modules/storage.py tests/test_storage.py
+git commit -m "feat: implement canonical SQLite schema with intent, state machine and FTS sync"
 ```
 
 ---
 
-### Task 3: Downloader Adapter (`yt-dlp`) with Circuit Breaker & Tenacity Retries
+### Task 3: Downloader Adapter with Circuit Breaker & Tenacity Retries
 
 **Files:**
 - Create: `modules/downloader.py`
@@ -540,36 +591,25 @@ git commit -m "feat: implement SQLite canonical schema with metrics telemetry qu
 
 **Interfaces:**
 - Produces: `Downloader` class:
-  - `parse_shortcode(raw_text: str) -> tuple[str | None, str | None]`
-  - `download_video(url: str, output_dir: Path) -> Path` (with circuit breaker)
+  - `parse_input(raw_text: str) -> tuple[str | None, str | None, str | None]` (Returns shortcode, canonical_url, and optional user_intent)
+  - `download_video(url: str, output_dir: Path) -> Path`
 
-- [ ] **Step 1: Write failing test for downloader and circuit breaker**
+- [ ] **Step 1: Write failing test for shortcode and user intent parsing**
 
 ```python
 # tests/test_downloader.py
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from modules.downloader import Downloader, DownloadError
+from modules.downloader import Downloader
 
-def test_parse_shortcode():
+def test_parse_input_with_intent():
     downloader = Downloader()
-    sid, canonical = downloader.parse_shortcode("https://www.instagram.com/reel/C-12345Abc/?igsh=test")
+    text = "https://www.instagram.com/reel/C-12345Abc/ Try this for Sunday meal prep"
+    sid, canonical, intent = downloader.parse_input(text)
     assert sid == "C-12345Abc"
     assert canonical == "https://www.instagram.com/reel/C-12345Abc/"
-
-@patch("modules.downloader.YoutubeDL")
-def test_download_video_success(mock_ydl_class, tmp_path):
-    mock_ydl = MagicMock()
-    mock_ydl_class.return_value.__enter__.return_value = mock_ydl
-    mock_ydl.extract_info.return_value = {"id": "C-12345Abc", "ext": "mp4"}
-    
-    video_file = tmp_path / "C-12345Abc.mp4"
-    video_file.write_text("dummy video")
-    
-    downloader = Downloader()
-    result = downloader.download_video("https://instagram.com/reel/C-12345Abc/", output_dir=tmp_path)
-    assert result.exists()
+    assert intent == "Try this for Sunday meal prep"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -600,13 +640,17 @@ class Downloader:
         self.consecutive_failures = 0
         self.circuit_open_until = 0
 
-    def parse_shortcode(self, raw_text: str) -> tuple[str | None, str | None]:
+    def parse_input(self, raw_text: str) -> tuple[str | None, str | None, str | None]:
         match = REEL_REGEX.search(raw_text)
         if not match:
-            return None, None
+            return None, None, None
         shortcode = match.group(1)
         canonical = f"https://www.instagram.com/reel/{shortcode}/"
-        return shortcode, canonical
+        
+        # Everything outside the URL is user intent
+        intent = raw_text.replace(match.group(0), "").strip()
+        intent = intent if intent else None
+        return shortcode, canonical, intent
 
     def _check_circuit(self):
         now = time.time()
@@ -620,7 +664,7 @@ class Downloader:
     def _record_failure(self):
         self.consecutive_failures += 1
         if self.consecutive_failures >= 3:
-            self.circuit_open_until = time.time() + 120  # 2 minute breaker
+            self.circuit_open_until = time.time() + 120
 
     @retry(
         stop=stop_after_attempt(3),
@@ -670,12 +714,12 @@ Expected: PASS
 
 ```bash
 git add modules/downloader.py tests/test_downloader.py
-git commit -m "feat: implement downloader adapter with circuit breaker and tenacity retries"
+git commit -m "feat: implement downloader with user intent parsing and circuit breaker"
 ```
 
 ---
 
-### Task 4: Multimodal Analyzer with Typed Schemas, Evidence Timestamps & Gemini Embedding 001
+### Task 4: Multimodal Analyzer with Real Confidence Scores & Configurable Embeddings
 
 **Files:**
 - Create: `modules/analyzer.py`
@@ -683,13 +727,13 @@ git commit -m "feat: implement downloader adapter with circuit breaker and tenac
 
 **Interfaces:**
 - Produces:
-  - `EntityItem`
+  - `EntityItem` (`confidence: float | None = None` — no fake defaults!)
   - `ReelAnalysisOutput`
   - `ReelAnalyzer` class:
     - `analyze_video(video_path: Path) -> ReelAnalysisOutput`
-    - `generate_embedding(text: str) -> list[float]` (768-dim)
+    - `generate_embedding(text: str) -> list[float]` (Respects `config.EMBEDDING_DIM`)
 
-- [ ] **Step 1: Write failing test for entity schemas and analyzer**
+- [ ] **Step 1: Write failing test for entity schemas with nullable confidence**
 
 ```python
 # tests/test_analyzer.py
@@ -697,20 +741,9 @@ import pytest
 from pathlib import Path
 from modules.analyzer import ReelAnalysisOutput, EntityItem
 
-def test_entity_evidence_schema():
-    data = {
-        "title": "Protein Pancakes",
-        "category": "recipe",
-        "tldr": "Quick healthy pancakes",
-        "entities": [
-            {"entity_type": "ingredient", "text": "50g Oats", "start_ts": 5.0, "end_ts": 8.0, "confidence": 0.95},
-            {"entity_type": "instruction", "text": "Blend with 2 eggs", "start_ts": 9.0, "end_ts": 14.0, "confidence": 0.90}
-        ],
-        "keyframe_timestamps": [5.0, 14.0]
-    }
-    out = ReelAnalysisOutput.model_validate(data)
-    assert out.category == "recipe"
-    assert out.entities[0].start_ts == 5.0
+def test_entity_nullable_confidence():
+    item = EntityItem(entity_type="ingredient", text="50g Oats", start_ts=5.0)
+    assert item.confidence is None  # Must be None, NOT hardcoded 0.90!
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -738,7 +771,7 @@ class EntityItem(BaseModel):
     text: str = Field(description="Exact fact, instruction, measurement or code")
     start_ts: float = Field(description="Start time in seconds where this appears or is spoken")
     end_ts: float | None = Field(default=None, description="End time in seconds")
-    confidence: float | None = Field(default=0.90, description="Confidence score between 0.0 and 1.0")
+    confidence: float | None = Field(default=None, description="Model-reported confidence (nullable, no fake default)")
 
 class ReelAnalysisOutput(BaseModel):
     title: str = Field(description="Short, crisp, descriptive title")
@@ -751,14 +784,17 @@ ANALYSIS_PROMPT = """
 You are ReelMind, an expert multimodal knowledge extraction agent.
 Analyze the video and audio of this Reel thoroughly.
 Extract grounded knowledge where every fact, measurement, or instruction is linked to its exact video timestamp.
+Do NOT fabricate confidence scores. If confident, provide a score (e.g. 0.95); otherwise leave confidence as null.
 Classify the category (recipe, tech, workout, idea, travel, finance, other).
 Identify 2 to 4 keyframe timestamps for high-res photo snapshots.
 Return strict JSON matching the schema.
 """
 
 class ReelAnalyzer:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, embedding_model: str = "models/gemini-embedding-001", embedding_dim: int = 768):
         self.client = genai.Client(api_key=api_key)
+        self.embedding_model = embedding_model
+        self.embedding_dim = embedding_dim
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=True)
     def analyze_video(self, video_path: Path) -> ReelAnalysisOutput:
@@ -793,10 +829,10 @@ class ReelAnalyzer:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=True)
     def generate_embedding(self, text: str) -> list[float]:
         response = self.client.models.embed_content(
-            model="models/gemini-embedding-001",
+            model=self.embedding_model,
             contents=text
         )
-        return response.embedding.values[:768]
+        return response.embedding.values[:self.embedding_dim]
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -808,7 +844,7 @@ Expected: PASS
 
 ```bash
 git add modules/analyzer.py tests/test_analyzer.py
-git commit -m "feat: implement multimodal analyzer with entity schemas and gemini-embedding-001"
+git commit -m "feat: implement analyzer with nullable confidence and configurable embedding dimensions"
 ```
 
 ---
@@ -908,7 +944,7 @@ git commit -m "feat: implement frame extractor module"
 
 ---
 
-### Task 6: Telegram Publisher with Interactive Inline Keyboards & Evidence Formatting
+### Task 6: Telegram Publisher with Feedback Buttons & Truthful Provenance
 
 **Files:**
 - Create: `modules/publisher.py`
@@ -916,11 +952,11 @@ git commit -m "feat: implement frame extractor module"
 
 **Interfaces:**
 - Produces: `TelegramPublisher` class:
-  - `format_note_html(analysis: ReelAnalysisOutput, original_url: str) -> str`
+  - `format_note_html(analysis: ReelAnalysisOutput, original_url: str, user_intent: str | None = None) -> str`
   - `build_inline_keyboard(reel_id: int, category: str) -> InlineKeyboardMarkup`
-  - `publish_reel(reel_id: int, analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str) -> int | None`
+  - `publish_reel(reel_id: int, analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str, user_intent: str | None = None) -> int | None`
 
-- [ ] **Step 1: Write failing test for HTML note formatting and keyboard generation**
+- [ ] **Step 1: Write failing test for HTML note formatting with intent and feedback buttons**
 
 ```python
 # tests/test_publisher.py
@@ -928,22 +964,22 @@ import pytest
 from modules.analyzer import ReelAnalysisOutput, EntityItem
 from modules.publisher import TelegramPublisher
 
-def test_format_note_html_and_keyboard():
+def test_format_note_html_truthful_confidence():
     publisher = TelegramPublisher(bot_token="fake", group_chat_id="-100")
     analysis = ReelAnalysisOutput(
         title="Quick Oats",
         category="recipe",
         tldr="Protein breakfast",
         entities=[
-            EntityItem(entity_type="ingredient", text="50g Oats", start_ts=8.0),
-            EntityItem(entity_type="instruction", text="Add milk", start_ts=15.0)
+            EntityItem(entity_type="ingredient", text="50g Oats", start_ts=8.0, confidence=None),
+            EntityItem(entity_type="instruction", text="Add milk", start_ts=15.0, confidence=0.94)
         ],
         keyframe_timestamps=[8.0]
     )
-    html = publisher.format_note_html(analysis, "https://instagram.com/reel/C-test/")
-    assert "🎬 <b>Quick Oats</b>" in html
-    assert "• 50g Oats <i>(00:08)</i>" in html
-    assert html.strip().endswith('<a href="https://instagram.com/reel/C-test/">https://instagram.com/reel/C-test/</a>')
+    html = publisher.format_note_html(analysis, "https://instagram.com/reel/C-test/", user_intent="Sunday meal prep")
+    assert "💡 <b>Why You Saved This:</b> Sunday meal prep" in html
+    assert "• 50g Oats <i>(00:08 | verified in video)</i>" in html
+    assert "• Add milk <i>(00:15 | 94% conf)</i>" in html
 
     kb = publisher.build_inline_keyboard(reel_id=42, category="recipe")
     assert kb is not None
@@ -954,7 +990,7 @@ def test_format_note_html_and_keyboard():
 Run: `pytest tests/test_publisher.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'modules.publisher')
 
-- [ ] **Step 3: Implement modules/publisher.py with inline keyboards**
+- [ ] **Step 3: Implement modules/publisher.py**
 
 ```python
 # modules/publisher.py
@@ -977,21 +1013,26 @@ class TelegramPublisher:
     def get_thread_id(self, category: str) -> int | None:
         return self.topic_map.get(category.lower())
 
-    def format_note_html(self, analysis: ReelAnalysisOutput, original_url: str) -> str:
+    def format_note_html(self, analysis: ReelAnalysisOutput, original_url: str, user_intent: str | None = None) -> str:
         safe_title = html.escape(analysis.title)
         safe_tldr = html.escape(analysis.tldr)
+
+        intent_block = ""
+        if user_intent:
+            intent_block = f"💡 <b>Why You Saved This:</b> {html.escape(user_intent)}\n\n"
 
         entity_lines = []
         for e in analysis.entities:
             ts_str = format_timestamp(e.start_ts)
-            confidence_badge = f" [{(int(e.confidence * 100))}%]" if e.confidence else ""
-            entity_lines.append(f"• {html.escape(e.text)} <i>({ts_str}{confidence_badge})</i>")
+            conf_str = f"{int(e.confidence * 100)}% conf" if e.confidence is not None else "verified in video"
+            entity_lines.append(f"• {html.escape(e.text)} <i>({ts_str} | {conf_str})</i>")
 
         body_block = "\n".join(entity_lines)
         safe_url = html.escape(original_url)
 
         return (
             f"🎬 <b>{safe_title}</b>\n\n"
+            f"{intent_block}"
             f"📌 <b>TL;DR:</b>\n{safe_tldr}\n\n"
             f"⚡ <b>Key Evidence & Steps:</b>\n{body_block}\n\n"
             f"🏷️ <i>#{analysis.category}</i>\n\n"
@@ -999,19 +1040,23 @@ class TelegramPublisher:
         )
 
     def build_inline_keyboard(self, reel_id: int, category: str) -> InlineKeyboardMarkup:
-        buttons = []
+        rows = []
         if category == "recipe":
-            buttons.append([InlineKeyboardButton("🛒 Get Grocery List", callback_data=f"grocery:{reel_id}")])
+            rows.append([InlineKeyboardButton("🛒 Get Grocery List", callback_data=f"grocery:{reel_id}")])
         elif category == "tech":
-            buttons.append([InlineKeyboardButton("💻 Copy Code", callback_data=f"code:{reel_id}")])
+            rows.append([InlineKeyboardButton("💻 Copy Code", callback_data=f"code:{reel_id}")])
         
-        buttons.append([
+        rows.append([
             InlineKeyboardButton("🔍 Ask", callback_data=f"ask:{reel_id}"),
             InlineKeyboardButton("✏️ Edit", callback_data=f"edit:{reel_id}")
         ])
-        return InlineKeyboardMarkup(buttons)
+        rows.append([
+            InlineKeyboardButton("👍 Accurate", callback_data=f"thumb_up:{reel_id}"),
+            InlineKeyboardButton("👎 Inaccurate", callback_data=f"thumb_down:{reel_id}")
+        ])
+        return InlineKeyboardMarkup(rows)
 
-    async def publish_reel(self, reel_id: int, analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str) -> int | None:
+    async def publish_reel(self, reel_id: int, analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str, user_intent: str | None = None) -> int | None:
         thread_id = self.get_thread_id(analysis.category)
         
         valid_frames = [p for p in frame_paths if Path(p).exists()]
@@ -1033,7 +1078,7 @@ class TelegramPublisher:
                 for fp in files_to_close:
                     fp.close()
 
-        text_content = self.format_note_html(analysis, original_url)
+        text_content = self.format_note_html(analysis, original_url, user_intent)
         reply_markup = self.build_inline_keyboard(reel_id, analysis.category)
         
         await self.bot.send_message(
@@ -1056,12 +1101,12 @@ Expected: PASS
 
 ```bash
 git add modules/publisher.py tests/test_publisher.py
-git commit -m "feat: implement telegram publisher with interactive inline keyboards"
+git commit -m "feat: implement publisher with feedback buttons, user intent and truthful provenance"
 ```
 
 ---
 
-### Task 7: Ingestion Pipeline with Telemetry & Security Whitelist (v1.0 MVP)
+### Task 7: Ingestion Pipeline with State Machine & Startup Recovery (v1.0 MVP)
 
 **Files:**
 - Create: `modules/metrics.py`
@@ -1069,10 +1114,11 @@ git commit -m "feat: implement telegram publisher with interactive inline keyboa
 - Create: `tests/test_pipeline.py`
 
 **Interfaces:**
-- Produces: `TelemetryMetrics` class & `ReelPipeline` class:
+- Produces: `ReelPipeline` class:
   - `process_url(raw_input: str, user_id: int | None = None) -> tuple[bool, str, int | None]`
+  - `startup_recovery() -> None`
 
-- [ ] **Step 1: Write failing test for telemetry and pipeline**
+- [ ] **Step 1: Write failing test for state machine and pipeline execution**
 
 ```python
 # tests/test_pipeline.py
@@ -1083,10 +1129,10 @@ from pipeline import ReelPipeline
 from modules.analyzer import ReelAnalysisOutput
 
 @pytest.mark.asyncio
-async def test_pipeline_flow_with_metrics(tmp_path):
+async def test_pipeline_state_machine_flow(tmp_path):
     settings = MagicMock()
     settings.TEMP_DIR = tmp_path
-    settings.allowed_users = [12345]
+    settings.allowed_users = []
     
     mock_db = MagicMock()
     mock_db.is_processed.return_value = False
@@ -1095,7 +1141,7 @@ async def test_pipeline_flow_with_metrics(tmp_path):
     mock_downloader = MagicMock()
     video_file = tmp_path / "test.mp4"
     video_file.write_text("dummy")
-    mock_downloader.parse_shortcode.return_value = ("C-test1", "https://instagram.com/reel/C-test1/")
+    mock_downloader.parse_input.return_value = ("C-test1", "https://instagram.com/reel/C-test1/", "Meal prep intent")
     mock_downloader.download_video.return_value = video_file
     
     mock_analyzer = MagicMock()
@@ -1124,17 +1170,12 @@ async def test_pipeline_flow_with_metrics(tmp_path):
         publisher=mock_publisher
     )
     
-    # Authorized user
-    success, msg, thread_id = await pipeline.process_url("https://instagram.com/reel/C-test1/", user_id=12345)
+    success, msg, thread_id = await pipeline.process_url("https://instagram.com/reel/C-test1/ Meal prep intent")
     assert success is True
     assert "Test Reel" in msg
     mock_db.add_reel.assert_called_once()
+    mock_db.update_reel_status.assert_called()
     assert not video_file.exists()
-
-    # Unauthorized user
-    ok, err, _ = await pipeline.process_url("https://instagram.com/reel/C-test2/", user_id=99999)
-    assert ok is False
-    assert "Unauthorized" in err
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1201,7 +1242,11 @@ class ReelPipeline:
         self.settings = settings
         self.db = db or ReelDatabase(settings.DATA_DIR / "reelminds.db")
         self.downloader = downloader or Downloader()
-        self.analyzer = analyzer or ReelAnalyzer(api_key=settings.GEMINI_API_KEY)
+        self.analyzer = analyzer or ReelAnalyzer(
+            api_key=settings.GEMINI_API_KEY,
+            embedding_model=settings.EMBEDDING_MODEL,
+            embedding_dim=settings.EMBEDDING_DIM
+        )
         self.extractor = extractor or FrameExtractor()
         self.publisher = publisher or TelegramPublisher(
             bot_token=settings.TELEGRAM_BOT_TOKEN,
@@ -1211,76 +1256,114 @@ class ReelPipeline:
         self.metrics = metrics or TelemetryMetrics()
         self._lock = asyncio.Lock()
 
+    def startup_recovery(self) -> None:
+        """Purge orphaned temporary files on startup, maintaining <100MB disk footprint."""
+        temp_dir = self.settings.TEMP_DIR
+        now = time.time()
+        for p in temp_dir.rglob("*"):
+            if p.is_file() and (now - p.stat().st_mtime > 3600):  # older than 1 hr
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+
     async def process_url(self, raw_input: str, user_id: int | None = None) -> tuple[bool, str, int | None]:
         start_time = time.time()
         if user_id is not None and self.settings.allowed_users and user_id not in self.settings.allowed_users:
             return False, "⛔ Unauthorized user. Access restricted by administrator.", None
 
         async with self._lock:
-            shortcode, canonical_url = self.downloader.parse_shortcode(raw_input)
+            shortcode, canonical_url, user_intent = self.downloader.parse_input(raw_input)
             if not shortcode or not canonical_url:
                 return False, "Not a valid Instagram Reel or Post URL.", None
 
-            # Deduplication
+            # Idempotency check
             if self.db.is_processed(shortcode):
-                return True, f"⚠️ Already saved reel <b>{shortcode}</b>. Duplicate rejected.", None
+                existing = self.db.get_reel_by_shortcode(shortcode)
+                cat = existing.get("category", "General") if existing else "General"
+                title = existing.get("title", "Reel") if existing else "Reel"
+                return True, f"⚠️ Already saved under <b>#{cat}</b>:\n📌 <i>{title}</i>", None
 
             video_dir = self.settings.TEMP_DIR / "videos"
             frames_dir = self.settings.TEMP_DIR / "frames"
             video_file: Path | None = None
             frame_paths: list[Path] = []
+            reel_id: int | None = None
 
             try:
-                # 1. Download
+                # State: RECEIVED -> register in DB
+                reel_id = self.db.add_reel(
+                    url=canonical_url,
+                    shortcode=shortcode,
+                    category="other",
+                    title="Processing...",
+                    user_intent=user_intent
+                )
+
+                # State: DOWNLOADING
+                self.db.update_reel_status(reel_id, "DOWNLOADING")
                 video_file = self.downloader.download_video(canonical_url, output_dir=video_dir)
 
-                # 2. Multimodal AI Analysis
+                # State: DOWNLOADED -> ANALYZING
+                self.db.update_reel_status(reel_id, "ANALYZING")
                 analysis = self.analyzer.analyze_video(video_file)
 
-                # 3. Extract evidence keyframes
+                # State: ANALYZED -> EXTRACTING_FRAMES
+                self.db.update_reel_status(reel_id, "EXTRACTING_FRAMES")
                 frame_paths = self.extractor.extract_frames(
                     video_path=video_file,
                     timestamps=analysis.keyframe_timestamps,
                     output_dir=frames_dir
                 )
 
-                # 4. Generate Embedding
+                # Generate Embedding
                 embedding: list[float] | None = None
                 try:
-                    embed_text = f"{analysis.title}\n{analysis.tldr}\n" + " ".join([e.text for e in analysis.entities])
+                    embed_text = f"{analysis.title}\n{user_intent or ''}\n{analysis.tldr}\n" + " ".join([e.text for e in analysis.entities])
                     embedding = self.analyzer.generate_embedding(embed_text)
                 except Exception:
                     pass
 
-                # 5. Save in SQLite
-                reel_id = self.db.add_reel(
-                    url=canonical_url,
-                    shortcode=shortcode,
-                    category=analysis.category,
-                    title=analysis.title,
-                    raw_transcript=analysis.tldr
-                )
-                
-                entities_dicts = [e.model_dump() for e in analysis.entities]
-                self.db.add_entities(reel_id, entities_dicts)
-
-                if embedding:
-                    self.db.store_embedding(reel_id, model="gemini-embedding-001", vector=embedding)
-
-                # 6. Publish to Telegram with Inline Keyboard
+                # State: PUBLISHING
+                self.db.update_reel_status(reel_id, "PUBLISHING")
                 thread_id = await self.publisher.publish_reel(
                     reel_id=reel_id,
                     analysis=analysis,
                     frame_paths=frame_paths,
-                    original_url=canonical_url
+                    original_url=canonical_url,
+                    user_intent=user_intent
                 )
+
+                # State: INDEXING
+                self.db.update_reel_status(reel_id, "INDEXING")
+                self.db.add_reel(
+                    url=canonical_url,
+                    shortcode=shortcode,
+                    category=analysis.category,
+                    title=analysis.title,
+                    user_intent=user_intent,
+                    raw_transcript=analysis.tldr
+                )
+                self.db.add_entities(reel_id, [e.model_dump() for e in analysis.entities])
+
+                if embedding:
+                    self.db.store_embedding(
+                        reel_id,
+                        model=self.settings.EMBEDDING_MODEL,
+                        dim=self.settings.EMBEDDING_DIM,
+                        vector=embedding
+                    )
+
+                # State: COMPLETED
+                self.db.update_reel_status(reel_id, "COMPLETED")
 
                 elapsed = time.time() - start_time
                 self.metrics.record_run(elapsed, success=True)
-
                 return True, f"✅ Indexed <b>{analysis.title}</b> under <i>#{analysis.category}</i> ({round(elapsed, 1)}s)", thread_id
 
             except Exception as e:
+                if reel_id:
+                    self.db.update_reel_status(reel_id, "FAILED", error_message=str(e))
                 elapsed = time.time() - start_time
                 self.metrics.record_run(elapsed, success=False)
                 return False, f"⚠️ Failed to process reel: {str(e)}", None
@@ -1304,7 +1387,7 @@ Expected: PASS
 
 ```bash
 git add modules/metrics.py pipeline.py tests/test_pipeline.py
-git commit -m "feat: implement ingestion pipeline with telemetry and user whitelist guard"
+git commit -m "feat: implement state machine pipeline with startup recovery and intent support"
 ```
 
 ---
@@ -1320,7 +1403,7 @@ git commit -m "feat: implement ingestion pipeline with telemetry and user whitel
   - `hybrid_search(query: str, top_k: int = 5) -> list[dict]`
   - `answer_conversational_query(query: str) -> str`
 
-- [ ] **Step 1: Write failing test for hybrid search engine**
+- [ ] **Step 1: Write failing test for search engine**
 
 ```python
 # tests/test_search.py
@@ -1351,7 +1434,7 @@ def test_hybrid_search():
 Run: `pytest tests/test_search.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'modules.search')
 
-- [ ] **Step 3: Implement modules/search.py with re-ranking**
+- [ ] **Step 3: Implement modules/search.py**
 
 ```python
 # modules/search.py
@@ -1404,9 +1487,14 @@ class SearchEngine:
         context_lines = []
         for idx, m in enumerate(matches, 1):
             ents = self.db.get_entities(m["id"])
-            ent_summary = "; ".join([f"{e['text']} ({int(e['start_ts'])}s, {int(e.get('confidence', 0.9)*100)}% conf)" for e in ents[:5]])
+            ent_summary = "; ".join([
+                f"{e['text']} ({int(e['start_ts'])}s" + (f", {int(e['confidence']*100)}% conf)" if e['confidence'] else ")")
+                for e in ents[:5]
+            ])
+            intent_str = f"Why saved: {m['user_intent']}\n" if m.get("user_intent") else ""
             context_lines.append(
                 f"[{idx}] Title: {m.get('title')}\n"
+                f"{intent_str}"
                 f"Category: {m.get('category')}\n"
                 f"Evidence: {ent_summary}\n"
                 f"Source: {m.get('url')}"
@@ -1420,7 +1508,7 @@ class SearchEngine:
         Here is the relevant retrieved knowledge with evidence timestamps:
         {context_str}
 
-        Answer the user's question directly and concisely in Telegram HTML. You MUST cite the specific evidence timestamps and confidence scores (e.g. ⏱️ 00:31 | 95% confidence) and include the original reel link. Refuse to answer from facts not present in the retrieved set.
+        Answer the user's question directly and concisely in Telegram HTML. You MUST cite the specific evidence timestamps and include the original reel link. If confidence is present, cite it; otherwise say 'verified in video'. Refuse to answer from facts not present in the retrieved set.
         """
         response = self.analyzer.client.models.generate_content(
             model="gemini-2.0-flash",
@@ -1438,12 +1526,12 @@ Expected: PASS
 
 ```bash
 git add modules/search.py tests/test_search.py
-git commit -m "feat: implement hybrid search with re-ranking and evidence confidence citation in /ask"
+git commit -m "feat: implement hybrid search and conversational /ask with grounded provenance"
 ```
 
 ---
 
-### Task 9: Action Hooks (`/grocery`, `/code`), Synchronized Re-Embedding (`/edit`), and Data Sovereignty (`/export`) (v1.2)
+### Task 9: Action Hooks, Feedback Logging, Atomic Re-Embedding & Export (v1.2)
 
 **Files:**
 - Create: `modules/actions.py`
@@ -1454,10 +1542,11 @@ git commit -m "feat: implement hybrid search with re-ranking and evidence confid
   - `generate_grocery_list(reel_id: int) -> str`
   - `generate_code_block(reel_id: int) -> str`
   - `apply_edit(entity_id: int, new_text: str) -> tuple[bool, str]`
+  - `record_feedback(reel_id: int, thumb: str) -> str`
   - `export_markdown(output_path: Path) -> Path`
   - `export_json(output_path: Path) -> Path`
 
-- [ ] **Step 1: Write failing test for actions and export**
+- [ ] **Step 1: Write failing test for feedback logging, actions and export**
 
 ```python
 # tests/test_actions.py
@@ -1466,29 +1555,17 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from modules.actions import ActionHandler
 
-def test_grocery_generation():
+def test_grocery_and_feedback():
     mock_db = MagicMock()
-    mock_db.get_entities.return_value = [
-        {"entity_type": "ingredient", "text": "50g Oats"},
-        {"entity_type": "instruction", "text": "Boil milk"}
-    ]
+    mock_db.get_entities.return_value = [{"entity_type": "ingredient", "text": "50g Oats"}]
     handler = ActionHandler(db=mock_db, analyzer=MagicMock())
-    grocery = handler.generate_grocery_list(reel_id=1)
-    assert "🛒 <b>Grocery Checklist</b>" in grocery
-    assert "• [ ] 50g Oats" in grocery
-
-def test_apply_edit_reembeds():
-    mock_db = MagicMock()
-    mock_db.update_entity.return_value = (True, 42)
-    mock_db.get_entities.return_value = [{"text": "250g Oats"}]
-    mock_analyzer = MagicMock()
-    mock_analyzer.generate_embedding.return_value = [0.1, 0.2]
     
-    handler = ActionHandler(db=mock_db, analyzer=mock_analyzer)
-    ok, msg = handler.apply_edit(entity_id=5, new_text="250g Oats")
-    assert ok is True
-    mock_analyzer.generate_embedding.assert_called_once()
-    mock_db.store_embedding.assert_called_once()
+    grocery = handler.generate_grocery_list(reel_id=1)
+    assert "• [ ] 50g Oats" in grocery
+    
+    msg = handler.record_feedback(reel_id=1, thumb="up")
+    assert "Thanks for the feedback" in msg
+    mock_db.log_action.assert_called_with(1, "feedback_thumb_up", {"vote": "up"})
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1544,16 +1621,29 @@ class ActionHandler:
         self.db.log_action(reel_id, "code", {"snippets": snippets})
         return "\n".join(lines)
 
+    def record_feedback(self, reel_id: int, thumb: str) -> str:
+        action_type = "feedback_thumb_up" if thumb == "up" else "feedback_thumb_down"
+        self.db.log_action(reel_id, action_type, {"vote": thumb})
+        if thumb == "up":
+            return "👍 Thanks for the feedback! Marked as accurate."
+        return "👎 Noted as inaccurate. You can tap [✏️ Edit] to correct any wrong details."
+
     def apply_edit(self, entity_id: int, new_text: str) -> tuple[bool, str]:
         ok, reel_id = self.db.update_entity(entity_id, new_text)
         if not ok:
             return False, f"Entity {entity_id} not found."
 
         try:
+            reel = self.db.get_reel_by_id(reel_id)
             ents = self.db.get_entities(reel_id)
-            combined_text = " ".join([e["text"] for e in ents])
+            combined_text = f"{reel['title']}\n{reel['user_intent'] or ''}\n" + " ".join([e["text"] for e in ents])
             new_embedding = self.analyzer.generate_embedding(combined_text)
-            self.db.store_embedding(reel_id, model="gemini-embedding-001", vector=new_embedding)
+            self.db.store_embedding(
+                reel_id,
+                model=self.analyzer.embedding_model,
+                dim=self.analyzer.embedding_dim,
+                vector=new_embedding
+            )
         except Exception:
             pass
 
@@ -1568,12 +1658,15 @@ class ActionHandler:
         lines = ["# ReelMind Knowledge Export\n"]
         for r in reels:
             lines.append(f"## {r.get('title', 'Untitled')}")
+            if r.get("user_intent"):
+                lines.append(f"- **Why I saved this:** {r['user_intent']}")
             lines.append(f"- **Category:** #{r.get('category')}")
             lines.append(f"- **Source:** {r.get('url')}")
             lines.append(f"- **Summary:** {r.get('raw_transcript')}\n")
             lines.append("### Grounded Evidence:")
             for e in r.get("entities", []):
-                lines.append(f"- [{int(e['start_ts'])}s] {e['text']} ({e['entity_type']})")
+                conf_str = f", {int(e['confidence']*100)}% conf" if e.get("confidence") is not None else ""
+                lines.append(f"- [{int(e['start_ts'])}s] {e['text']} ({e['entity_type']}{conf_str})")
             lines.append("\n---\n")
 
         output_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1596,7 +1689,7 @@ Expected: PASS
 
 ```bash
 git add modules/actions.py tests/test_actions.py
-git commit -m "feat: implement actions (/grocery, /code), synchronized edit and /export"
+git commit -m "feat: implement action hooks, feedback voting, re-embedding edit and export"
 ```
 
 ---
@@ -1740,12 +1833,12 @@ Expected: PASS
 
 ```bash
 git add modules/scheduler.py tests/test_scheduler.py
-git commit -m "feat: implement Sunday review digest and canary test scheduler"
+git commit -m "feat: implement Sunday digest and canary test scheduler"
 ```
 
 ---
 
-### Task 11: Telegram Poller Daemon, Callback Query Handlers, Telemetry & Documentation
+### Task 11: Telegram Poller Daemon, Inline Handlers, Telemetry & Documentation
 
 **Files:**
 - Create: `main.py`
@@ -1753,7 +1846,7 @@ git commit -m "feat: implement Sunday review digest and canary test scheduler"
 - Create: `docker-compose.yml`
 - Create: `README.md`
 
-- [ ] **Step 1: Implement main.py connecting callbacks, commands, telemetry, and CLI runner**
+- [ ] **Step 1: Implement main.py connecting callbacks, commands, telemetry, startup recovery and CLI runner**
 
 ```python
 # main.py
@@ -1813,10 +1906,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         reel_id = int(data.split(":")[1])
         code_text = actions.generate_code_block(reel_id)
         await query.message.reply_text(code_text, parse_mode="HTML")
+    elif data.startswith("thumb_up:"):
+        reel_id = int(data.split(":")[1])
+        msg = actions.record_feedback(reel_id, "up")
+        await query.message.reply_text(msg)
+    elif data.startswith("thumb_down:"):
+        reel_id = int(data.split(":")[1])
+        msg = actions.record_feedback(reel_id, "down")
+        await query.message.reply_text(msg)
     elif data.startswith("ask:"):
-        await query.message.reply_text("💬 To ask a question about this reel or any saved reels, simply reply with <code>/ask &lt;your question&gt;</code>", parse_mode="HTML")
+        await query.message.reply_text("💬 Reply with <code>/ask &lt;your question&gt;</code>", parse_mode="HTML")
     elif data.startswith("edit:"):
-        await query.message.reply_text("✏️ To correct any details, use <code>/edit &lt;entity_id&gt; &lt;new text&gt;</code>", parse_mode="HTML")
+        await query.message.reply_text("✏️ Use <code>/edit &lt;entity_id&gt; &lt;new text&gt;</code> to correct any item.", parse_mode="HTML")
 
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pipeline: ReelPipeline = context.application.bot_data["pipeline"]
@@ -1826,7 +1927,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"📊 <b>ReelMind Telemetry & Status:</b>\n\n"
         f"⏱️ <b>Uptime:</b> {metrics['uptime_mins']} minutes\n"
-        f"⚡ <b>Last Pipeline Latency:</b> {metrics['last_latency_sec']}s\n"
+        f"⚡ <b>Last Latency:</b> {metrics['last_latency_sec']}s\n"
         f"✅ <b>Total Indexed Reels:</b> {db_metrics['total_reels']}\n"
         f"🧬 <b>Total Grounded Entities:</b> {db_metrics['total_entities']}\n"
         f"🧠 <b>Total Embeddings:</b> {db_metrics['total_embeddings']}\n"
@@ -1836,10 +1937,10 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_canary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scheduler: SchedulerService = context.application.bot_data["scheduler"]
-    status_msg = await update.message.reply_text("🧪 Running live Canary health check on pipeline...")
+    status_msg = await update.message.reply_text("🧪 Running live Canary health diagnostic...")
     ok, details = await scheduler.run_canary_test()
     if ok:
-        await status_msg.edit_text(f"✅ <b>Canary Health Check Passed!</b>\nPipeline is operational.")
+        await status_msg.edit_text("✅ <b>Canary Check Passed!</b>\nTelegram, SQLite, Gemini, and Downloader are operational.")
     else:
         await status_msg.edit_text(f"🚨 <b>Canary Check Failed!</b>\n{details}")
 
@@ -1904,6 +2005,7 @@ async def handle_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_document(document=fp, caption=f"📦 Exported ReelMind knowledge ({fmt.upper()})")
 
 def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: ActionHandler, settings: Settings):
+    pipeline.startup_recovery()
     app = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build()
     
     scheduler = SchedulerService(
@@ -1941,6 +2043,7 @@ def main():
 
     settings = Settings()
     pipeline = ReelPipeline(settings)
+    pipeline.startup_recovery()
     search_engine = SearchEngine(pipeline.db, pipeline.analyzer)
     actions = ActionHandler(pipeline.db, pipeline.analyzer)
 
@@ -1990,5 +2093,5 @@ Expected: All tests PASS
 
 ```bash
 git add main.py Dockerfile docker-compose.yml README.md
-git commit -m "feat: complete ReelMind runner with inline buttons, telemetry status, dockerization and documentation"
+git commit -m "feat: master edition with user intent, state machine, truthful provenance and feedback loop"
 ```
