@@ -151,10 +151,9 @@ User on Instagram App
   * Defaults to General if thread ID is not mapped.
 * **Message Delivery:**
   1. **Album:** Calls `bot.send_media_group` with the extracted highlight frames.
-  2. **Summary Message:** Formatted in Telegram HTML:
+  2. **Summary Message:** Formatted in Telegram HTML with original Reel link at the bottom:
      ```html
      🎬 <b>10-Minute High-Protein Overnight Oats</b>
-     🔗 <a href="https://instagram.com/reel/...">Original Reel</a>
 
      📌 <b>TL;DR:</b>
      Quick meal-prep recipe providing 35g protein without cooking.
@@ -165,8 +164,12 @@ User on Instagram App
      • Storage: Stays fresh up to 4 days refrigerated.
 
      🏷️ #Recipes #Nutrition #MealPrep
+
+     🔗 <b>Original Reel:</b> https://instagram.com/reel/...
      ```
-  3. **Status Cleanup:** The initial *"⏳ Processing reel..."* message is deleted or updated to keep the chat clean.
+  3. **Auto-Cleanup & Disk Management:** 
+     Immediately after the photo album and summary are posted to Telegram, the temporary `.mp4` video file and extracted `.jpg` frames in `temp/` are deleted automatically, keeping local disk usage at zero.
+  4. **Status Cleanup:** The initial *"⏳ Processing reel..."* message is deleted or updated to keep the chat clean.
 
 ### 3.6 Local Cache & Duplicate Prevention
 * Lightweight SQLite database `data/reels.db`:
