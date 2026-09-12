@@ -95,126 +95,42 @@ ReelMind moves one abstraction layer above video summarization:
     ```
   * Prevents duplicate video downloads, redundant AI API calls, and channel clutter.
 
-### 3.2 Downloader Adapter (`modules/downloader.py`)
-* **Tool:** `yt-dlp` invoked via isolated Python wrapper.
-* **Failure Isolation:** Instagram frequently changes delivery endpoints. If `yt-dlp` fails:
-  * Emits descriptive error with diagnostic hints (e.g. `yt-dlp update required` or `private reel`).
-  * Gracefully informs user in Telegram without crashing the background service.
-* **Storage & Cleanup:** Downloads to `temp/videos/{shortcode}.mp4`. File is guaranteed deleted immediately after Gemini upload and frame extraction.
+### 3.2 Downloader Adapter with Resilience (`modules/downloader.py`)
+* **Tool:** `yt-dlp` wrapped with `tenacity` exponential backoff (3 attempts, 2s/4s/8s).
+* **Failure Isolation:** Catches extraction errors cleanly, providing diagnostic hints without crashing the bot daemon.
+* **Storage & Cleanup:** Downloads to `temp/videos/{shortcode}.mp4` and deletes immediately upon frame extraction and analysis.
 
 ### 3.3 Multimodal Analysis & Extensible Schema (`modules/analyzer.py`)
-* **Model:** `gemini-2.0-flash` via official `google-genai` SDK.
+* **Model:** `gemini-2.0-flash` for multimodal video+audio understanding; `models/gemini-embedding-001` for vector embeddings (avoiding deprecated `text-embedding-004`).
+* **Resilience:** Wrapped with `@retry` via `tenacity` with exponential backoff on `ResourceExhausted` (429) and network transport drops.
 * **Canonical Knowledge Schema:**
-```json
-{
-  "title": "String (engaging, descriptive title)",
-  "content_type": "recipe | workout | tech_coding | finance | book_ideas | travel | general",
-  "tldr": "String (1-2 sentence executive summary)",
-  "timeline": [
-    { "timestamp": 0.0, "label": "Hook / Problem" },
-    { "timestamp": 8.5, "label": "Ingredients / Tools" },
-    { "timestamp": 22.0, "label": "Core Technique" },
-    { "timestamp": 45.0, "label": "Final Result" }
-  ],
-  "claims_with_evidence": [
-    {
-      "claim": "Bake at 180°C for 20 minutes",
-      "evidence_timestamp": 31.5,
-      "confidence": "high"
-    }
-  ],
-  "key_takeaways": ["Takeaway 1", "Takeaway 2"],
-  "highlight_timestamps": [8.5, 45.0],
-  "structured_data": {
-    "recipe": {
-      "prep_time_minutes": 10,
-      "servings": 2,
-      "ingredients": [{"item": "Rolled oats", "quantity": "50g"}],
-      "instructions": ["Step 1...", "Step 2..."]
-    },
-    "tech": {
-      "languages_tools": ["Python", "SQLite"],
-      "code_snippets": ["pip install apscheduler"],
-      "github_links": []
-    },
-    "workout": {
-      "target_muscles": ["Quads", "Glutes"],
-      "exercises": [{"name": "Bulgarian Split Squat", "sets": 3, "reps": "8-10"}]
-    }
-  },
-  "tags": ["#Recipes", "#Nutrition", "#MealPrep"]
-}
-```
+  * Typed domain payload (`recipe`, `tech`, `workout`, `book_ideas`, `general`).
+  * Video Timeline (`Hook`, `Prep`, `Technique`, `Result`).
+  * Claims with exact evidence timestamps (`claim`, `evidence_timestamp`, `confidence`).
 
 ### 3.4 Keyframe Snapshot Extractor (`modules/frame_extractor.py`)
 * **Tool:** `ffmpeg` via Python `subprocess`.
 * Extracts high-resolution JPEG frames at the exact `highlight_timestamps` (max 3-4 images).
 * Automatic deletion from `temp/frames/` immediately after Telegram media group upload.
 
-### 3.5 Canonical Knowledge Database & Hybrid Search (`modules/storage.py` & `modules/search.py`)
-* **Database:** SQLite `data/reelminds.db`
-  * Table `reels`:
-    - `id` (INTEGER PRIMARY KEY)
-    - `source_id` (TEXT UNIQUE) — Instagram shortcode
-    - `source_url` (TEXT)
-    - `title` (TEXT)
-    - `content_type` (TEXT)
-    - `tldr` (TEXT)
-    - `structured_data_json` (TEXT)
-    - `claims_json` (TEXT)
-    - `timeline_json` (TEXT)
-    - `tags_csv` (TEXT)
-    - `thread_id` (INTEGER)
-    - `embedding_json` (BLOB/TEXT) — Gemini `text-embedding-004` vector (768 dims)
-    - `created_at` (DATETIME)
-    - `updated_at` (DATETIME)
-  * Virtual Table `reels_fts` (SQLite FTS5):
-    - Full-text search over `title`, `tldr`, `tags_csv`, `structured_data_json`.
-* **Hybrid Retrieval Engine:**
-  - Queries FTS5 for exact keyword matches.
-  - Queries vector cosine similarity for conceptual/semantic matches (`"What should I do before gym?"` -> finds `"10-minute mobility routine"`).
-  - Merges and ranks results (Reciprocal Rank Fusion / linear combination).
-  - Feeds top 3-5 results to Gemini to generate conversational answers with source citations.
+### 3.5 Canonical Knowledge Store & Hybrid Search (`modules/storage.py` & `modules/search.py`)
+* **Database:** SQLite `data/reelminds.db` with FTS5 virtual table.
+* **Embeddings:** `gemini-embedding-001` vectors stored alongside records.
+* **Synchronized Updates:** Whenever structured data or text is updated via `/edit`, the record's embedding is automatically regenerated and updated in the same transaction to maintain search index integrity.
+* **Hybrid Retrieval:** Blends FTS5 keyword matching with cosine similarity on vector embeddings.
 
-### 3.6 Telegram Presentation & Interactive Actions (`modules/publisher.py` & `main.py`)
-* **Delivery:**
-  1. **Photo Album:** `send_media_group` with the extracted highlight frames.
-  2. **Evidence-Annotated HTML Note:**
-     ```html
-     🎬 <b>10-Minute High-Protein Overnight Oats</b>
+### 3.6 Telegram Presentation, Actions & Data Sovereignty (`modules/publisher.py`, `modules/actions.py`)
+* **Delivery:** Photo album + Evidence-annotated HTML note with the original Reel link at the bottom.
+* **Interactive Actions:**
+  * `/ask <question>` — Conversational query answering with grounded citations.
+  * `/grocery` — (Reply to recipe) Instant copy-pasteable shopping list.
+  * `/code` — (Reply to tech post) Extracts clean syntax-highlighted code blocks.
+  * `/edit <old> -> <new>` — Corrects AI inaccuracies and immediately triggers re-embedding.
+  * `/export <md|json>` — Exports the entire knowledge base to a downloadable Markdown or JSON file sent directly in Telegram (Zero vendor lock-in).
 
-     📌 <b>TL;DR:</b>
-     Quick meal-prep recipe providing 35g protein without cooking.
-
-     ⏱️ <b>Timeline:</b>
-     • 00:08 — Ingredients breakdown
-     • 00:32 — Mixing & consistency
-     • 00:45 — Finished plated jar
-
-     ⚡ <b>Key Highlights & Evidence:</b>
-     • Base: 50g oats, 1 scoop vanilla whey <i>(00:08)</i>
-     • Texture trick: 1 tbsp chia seeds creates pudding-like consistency <i>(00:20)</i>
-     • Storage: Stays fresh up to 4 days refrigerated <i>(00:50)</i>
-
-     🏷️ #Recipes #Nutrition #MealPrep
-
-     🔗 <b>Original Reel:</b> https://instagram.com/reel/...
-     ```
-* **Interactive Command Hooks:**
-  * `/ask <question>` — Conversational search across your saved second brain.
-  * `/grocery` — (Reply to a recipe post) Formats an instant copy-pasteable shopping list.
-  * `/code` — (Reply to a tech post) Extracts clean syntax-highlighted code blocks.
-  * `/edit <old> -> <new>` — Enables user correction of extracted details (e.g. correcting a misheard quantity).
-* **Sunday Action Review:**
-  * Powered by `APScheduler` at 09:00 AM every Sunday.
-  * Formats an actionable review of the week:
-    ```
-    🧠 YOUR REELMIND — SUNDAY REVIEW
-    🍳 3 recipes saved (tap for grocery list)
-    🏋️ 2 workouts saved (tap for routine)
-    💻 4 tech ideas saved
-    ⭐ Most recurring topic: AI Agents & Automation
-    ```
+### 3.7 Proactive Canary Health Check & Sunday Review (`modules/scheduler.py`)
+* **Sunday Action Review:** Weekly Sunday 09:00 AM rollup of week's saved knowledge.
+* **Canary Health Job:** Scheduled weekly test run (Tuesdays at 03:00 AM) that tests the pipeline against a stable test reel. If Instagram changes break `yt-dlp` or Gemini API changes, the bot proactively notifies the owner before a real user reel fails.
 
 ---
 

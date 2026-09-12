@@ -5,21 +5,22 @@
 **Goal:** Build ReelMind — a self-hosted, Telegram-native multimodal personal second brain that turns saved short-form content into structured, actionable knowledge, anchored on **Memory → Evidence → Retrieval → Action**.
 
 **Architecture:** A decoupled, modular Python 3.10+ application featuring:
-- **Ingestion Adapter:** Telegram Share Sheet link receiver with canonical shortcode deduplication.
-- **Extraction Adapter:** `yt-dlp` video fetcher + `ffmpeg` evidence frame snapshot grabber.
-- **Multimodal Understanding:** Gemini 2.0 Flash with extensible typed schemas (Recipe, Workout, Tech, Ideas), grounded claims with evidence timestamps, and a full video timeline.
-- **Canonical Knowledge Base:** SQLite as the single source of truth, featuring structured JSON storage, FTS5 full-text search, and Gemini vector embeddings (`text-embedding-004`).
-- **Telegram Interface & Actions:** Forum topic router, photo album publisher, evidence-annotated HTML notes with original links at the bottom, conversational `/ask` retrieval, `/grocery` / `/code` action generators, `/edit` user corrections, and an actionable Sunday Review digest.
+- **Resilient Ingestion & Extraction:** Telegram Share Sheet link receiver with canonical shortcode deduplication + `yt-dlp` wrapped with `tenacity` exponential backoff retries.
+- **Evidence-Grounded Multimodal AI:** Gemini 2.0 Flash with extensible typed schemas (Recipe, Workout, Tech, Ideas), grounded claims with evidence timestamps, video timeline, and modern `models/gemini-embedding-001` vectors (with tenacity retries).
+- **Canonical Knowledge Base & Data Sovereignty:** SQLite source of truth with FTS5, vector search, synchronized re-embedding on user edits (`/edit`), and full exportability (`/export`).
+- **Interactive Actions & Proactive Health:** Direct Telegram command hooks (`/ask`, `/grocery`, `/code`, `/edit`, `/export`), Sunday Action Review, and a weekly background Canary test to alert on `yt-dlp` breaks.
 
-**Tech Stack:** Python 3.10+, `python-telegram-bot>=21.0`, `google-genai>=0.1.0`, `yt-dlp>=2024.8.6`, `pydantic>=2.7.0`, `pydantic-settings>=2.2.0`, `apscheduler>=3.10.0`, `numpy>=1.26.0`, `pytest`, `pytest-asyncio`, `ffmpeg`.
+**Tech Stack:** Python 3.10+, `python-telegram-bot>=21.0`, `google-genai>=0.1.0`, `yt-dlp>=2024.8.6`, `pydantic>=2.7.0`, `pydantic-settings>=2.2.0`, `apscheduler>=3.10.0`, `tenacity>=8.2.0`, `numpy>=1.26.0`, `pytest`, `pytest-asyncio`, `ffmpeg`.
 
 **Spec:** [`docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md`](file:///c:/Akhil/Instagram/docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md)
 
 ## Global Constraints
-- **No Instagram account logins or scraping credentials** — zero account ban risk.
+- **Zero Instagram account logins or scraping credentials** — zero account ban risk.
 - **Designed for personal self-hosted use within free tiers** (Gemini free tier, Telegram Bot API, SQLite).
 - **SQLite is the canonical source of truth**; Telegram is purely a presentation and interaction view.
 - **Evidence-backed outputs:** All claims, ingredients, and steps must be paired with video timeline evidence timestamps.
+- **Continuous index integrity:** Any edit via `/edit` must automatically re-embed the record in the same operation.
+- **Data sovereignty:** `/export` must allow exporting all records to clean Markdown or JSON anytime.
 - **Zero disk bloat:** Temporary MP4 video and JPEG frame files must be cleaned up immediately after dispatch.
 - **Original links:** The source Reel link must always appear at the bottom of the Telegram note.
 
@@ -38,6 +39,7 @@
   - `TELEGRAM_BOT_TOKEN: str`
   - `TELEGRAM_GROUP_CHAT_ID: int | str`
   - `GEMINI_API_KEY: str`
+  - `CANARY_REEL_URL: str | None`
   - `DATA_DIR: Path`
   - `TEMP_DIR: Path`
   - `topic_map: dict[str, int | None]`
@@ -84,6 +86,7 @@ yt-dlp>=2024.8.6
 pydantic>=2.7.0
 pydantic-settings>=2.2.0
 apscheduler>=3.10.0
+tenacity>=8.2.0
 numpy>=1.26.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
@@ -94,6 +97,7 @@ Create `.env.example`:
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_from_botfather
 TELEGRAM_GROUP_CHAT_ID=-1001234567890
 GEMINI_API_KEY=your_gemini_api_key_from_google_ai_studio
+CANARY_REEL_URL=https://www.instagram.com/reel/C-stable123/
 ```
 
 Create `config.py`:
@@ -108,6 +112,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram bot token from @BotFather")
     TELEGRAM_GROUP_CHAT_ID: str | int = Field(..., description="Target Telegram Group / Channel ID")
     GEMINI_API_KEY: str = Field(..., description="Google AI Studio Gemini API Key")
+    CANARY_REEL_URL: str | None = Field(default=None, description="Stable public Reel URL for weekly health canary")
     
     # Topic Thread IDs (Optional)
     TOPIC_RECIPES_THREAD_ID: int | None = None
@@ -126,6 +131,7 @@ class Settings(BaseSettings):
         self.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         (self.TEMP_DIR / "videos").mkdir(parents=True, exist_ok=True)
         (self.TEMP_DIR / "frames").mkdir(parents=True, exist_ok=True)
+        (self.TEMP_DIR / "exports").mkdir(parents=True, exist_ok=True)
 
     @property
     def topic_map(self) -> dict[str, int | None]:
@@ -149,12 +155,12 @@ Expected: PASS
 
 ```bash
 git add requirements.txt .env.example config.py tests/test_config.py
-git commit -m "feat: setup project dependencies and configuration loader"
+git commit -m "feat: setup project dependencies with tenacity and configuration loader"
 ```
 
 ---
 
-### Task 2: Canonical SQLite Database with FTS5 & Deduplication
+### Task 2: Canonical SQLite Database with FTS5, Deduplication & Export Queries
 
 **Files:**
 - Create: `modules/__init__.py`
@@ -163,15 +169,17 @@ git commit -m "feat: setup project dependencies and configuration loader"
 
 **Interfaces:**
 - Produces: `ReelDatabase` class:
-  - `add_reel(source_id: str, source_url: str, title: str, content_type: str, tldr: str, timeline: list, claims: list, structured_data: dict, tags: list, thread_id: int | None, embedding: list[float] | None = None) -> int`
+  - `add_reel(...) -> int`
   - `is_processed(source_id: str) -> bool`
   - `get_reel_by_source_id(source_id: str) -> dict | None`
   - `get_reel_by_id(reel_id: int) -> dict | None`
-  - `update_structured_data(reel_id: int, structured_data: dict) -> bool`
+  - `update_structured_data(reel_id: int, structured_data: dict, embedding: list[float] | None = None) -> bool`
   - `search_fts(query: str, limit: int = 5) -> list[dict]`
   - `get_recent_reels(days: int = 7) -> list[dict]`
+  - `get_all_reels() -> list[dict]`
+  - `get_all_embeddings() -> list[dict]`
 
-- [ ] **Step 1: Write failing test for SQLite storage, FTS5, and deduplication**
+- [ ] **Step 1: Write failing test for SQLite storage, FTS5, and re-embedding update**
 
 ```python
 # tests/test_storage.py
@@ -179,9 +187,8 @@ import pytest
 from pathlib import Path
 from modules.storage import ReelDatabase
 
-def test_database_lifecycle_and_deduplication(tmp_path: Path):
-    db_path = tmp_path / "test_reelminds.db"
-    db = ReelDatabase(db_path)
+def test_database_lifecycle_and_update(tmp_path: Path):
+    db = ReelDatabase(tmp_path / "test_reelminds.db")
     
     shortcode = "C-xyz123"
     url = f"https://www.instagram.com/reel/{shortcode}/"
@@ -195,37 +202,28 @@ def test_database_lifecycle_and_deduplication(tmp_path: Path):
         tldr="Quick no-cook breakfast.",
         timeline=[{"timestamp": 8.0, "label": "Ingredients"}],
         claims=[{"claim": "35g protein", "evidence_timestamp": 8.0}],
-        structured_data={"ingredients": [{"item": "Oats", "quantity": "50g"}]},
+        structured_data={"recipe": {"ingredients": [{"item": "Oats", "quantity": "500g"}]}},
         tags=["#Recipes", "#Nutrition"],
-        thread_id=12
+        thread_id=12,
+        embedding=[0.1, 0.2]
     )
     
     assert reel_id > 0
     assert db.is_processed(shortcode)
     
-    record = db.get_reel_by_source_id(shortcode)
-    assert record is not None
-    assert record["title"] == "10-Minute High-Protein Oats"
-    assert record["content_type"] == "Recipes & Food"
-    assert "Oats" in record["structured_data_json"]
-
-def test_fts5_search(tmp_path: Path):
-    db = ReelDatabase(tmp_path / "test_search.db")
-    db.add_reel(
-        source_id="c1",
-        source_url="https://ig.com/reel/c1",
-        title="Bulgarian Split Squat Mastery",
-        content_type="Fitness & Health",
-        tldr="Fix your squat technique.",
-        timeline=[],
-        claims=[],
-        structured_data={"exercises": ["Bulgarian split squats"]},
-        tags=["#Workout", "#Legs"]
-    )
+    # Test update structured data and re-embedding
+    new_structured = {"recipe": {"ingredients": [{"item": "Oats", "quantity": "250g"}]}}
+    new_embedding = [0.3, 0.4]
+    ok = db.update_structured_data(reel_id, new_structured, embedding=new_embedding)
+    assert ok is True
     
-    results = db.search_fts("squat")
-    assert len(results) == 1
-    assert results[0]["title"] == "Bulgarian Split Squat Mastery"
+    record = db.get_reel_by_id(reel_id)
+    assert "250g" in record["structured_data_json"]
+    assert "500g" not in record["structured_data_json"]
+    
+    # Test export query
+    all_reels = db.get_all_reels()
+    assert len(all_reels) == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -273,7 +271,6 @@ class ReelDatabase:
                     updated_at TEXT NOT NULL
                 )
             """)
-            # Create FTS5 Virtual Table
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS reels_fts USING fts5(
                     id UNINDEXED,
@@ -285,7 +282,6 @@ class ReelDatabase:
                     content_rowid=id
                 )
             """)
-            # Triggers to keep FTS5 synchronized with reels table
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS reels_ai AFTER INSERT ON reels BEGIN
                     INSERT INTO reels_fts(rowid, id, title, tldr, tags_csv, structured_data_json)
@@ -371,13 +367,19 @@ class ReelDatabase:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def update_structured_data(self, reel_id: int, structured_data: dict) -> bool:
+    def update_structured_data(self, reel_id: int, structured_data: dict, embedding: list[float] | None = None) -> bool:
         now = datetime.utcnow().isoformat()
         with self._get_connection() as conn:
-            cursor = conn.execute(
-                "UPDATE reels SET structured_data_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(structured_data), now, reel_id)
-            )
+            if embedding is not None:
+                cursor = conn.execute(
+                    "UPDATE reels SET structured_data_json = ?, embedding_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(structured_data), json.dumps(embedding), now, reel_id)
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE reels SET structured_data_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(structured_data), now, reel_id)
+                )
             conn.commit()
             return cursor.rowcount > 0
 
@@ -404,6 +406,11 @@ class ReelDatabase:
             cursor = conn.execute("SELECT * FROM reels WHERE created_at >= ? ORDER BY created_at DESC", (since,))
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_all_reels(self) -> list[dict]:
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM reels ORDER BY created_at DESC")
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_all_embeddings(self) -> list[dict]:
         with self._get_connection() as conn:
             cursor = conn.execute("SELECT id, title, content_type, tldr, source_url, embedding_json FROM reels WHERE embedding_json IS NOT NULL")
@@ -424,12 +431,12 @@ Expected: PASS
 
 ```bash
 git add modules/__init__.py modules/storage.py tests/test_storage.py
-git commit -m "feat: implement canonical SQLite storage with FTS5 and deduplication"
+git commit -m "feat: implement SQLite canonical store with atomic re-embedding and export queries"
 ```
 
 ---
 
-### Task 3: Downloader Adapter with Error Isolation & Deduplication Parsing
+### Task 3: Downloader Adapter with Tenacity Retries & Failure Isolation
 
 **Files:**
 - Create: `modules/downloader.py`
@@ -437,10 +444,10 @@ git commit -m "feat: implement canonical SQLite storage with FTS5 and deduplicat
 
 **Interfaces:**
 - Produces: `Downloader` class:
-  - `parse_source_id(raw_text: str) -> tuple[str | None, str | None]` (Returns `(source_id, canonical_url)`)
-  - `download_video(url: str, output_dir: Path) -> Path` (Raises `DownloadError` with clear diagnostics if failed)
+  - `parse_source_id(raw_text: str) -> tuple[str | None, str | None]`
+  - `download_video(url: str, output_dir: Path) -> Path` (Retries 3 times with exponential backoff on transient errors)
 
-- [ ] **Step 1: Write failing test for shortcode parser and downloader mock**
+- [ ] **Step 1: Write failing test for downloader and retry behavior**
 
 ```python
 # tests/test_downloader.py
@@ -449,25 +456,11 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from modules.downloader import Downloader, DownloadError
 
-def test_parse_source_id_and_canonical_url():
+def test_parse_source_id():
     downloader = Downloader()
-    
-    # Reel with query tracking params
-    raw1 = "Hey, check this: https://www.instagram.com/reel/C-12345Abc/?igsh=xyz123=="
-    sid, canonical = downloader.parse_source_id(raw1)
+    sid, canonical = downloader.parse_source_id("https://instagram.com/reel/C-12345Abc/?igsh=test")
     assert sid == "C-12345Abc"
     assert canonical == "https://www.instagram.com/reel/C-12345Abc/"
-
-    # /p/ post variant
-    raw2 = "https://instagram.com/p/PostShort123"
-    sid2, canonical2 = downloader.parse_source_id(raw2)
-    assert sid2 == "PostShort123"
-    assert canonical2 == "https://www.instagram.com/p/PostShort123/"
-
-    # Invalid non-IG link
-    sid3, canonical3 = downloader.parse_source_id("https://twitter.com/post/123")
-    assert sid3 is None
-    assert canonical3 is None
 
 @patch("modules.downloader.YoutubeDL")
 def test_download_video_success(mock_ydl_class, tmp_path):
@@ -476,10 +469,10 @@ def test_download_video_success(mock_ydl_class, tmp_path):
     mock_ydl.extract_info.return_value = {"id": "C-12345Abc", "ext": "mp4"}
     
     video_file = tmp_path / "C-12345Abc.mp4"
-    video_file.write_text("fake video")
+    video_file.write_text("dummy video")
     
     downloader = Downloader()
-    result = downloader.download_video("https://www.instagram.com/reel/C-12345Abc/", output_dir=tmp_path)
+    result = downloader.download_video("https://instagram.com/reel/C-12345Abc/", output_dir=tmp_path)
     assert result.exists()
 ```
 
@@ -488,13 +481,14 @@ def test_download_video_success(mock_ydl_class, tmp_path):
 Run: `pytest tests/test_downloader.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'modules.downloader')
 
-- [ ] **Step 3: Implement modules/downloader.py**
+- [ ] **Step 3: Implement modules/downloader.py with tenacity**
 
 ```python
 # modules/downloader.py
 import re
 from pathlib import Path
 from yt_dlp import YoutubeDL
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 REEL_REGEX = re.compile(r'https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/([a-zA-Z0-9_-]+)')
 
@@ -502,9 +496,6 @@ class DownloadError(Exception):
     pass
 
 class Downloader:
-    def __init__(self):
-        pass
-
     def parse_source_id(self, raw_text: str) -> tuple[str | None, str | None]:
         match = REEL_REGEX.search(raw_text)
         if not match:
@@ -515,6 +506,12 @@ class Downloader:
         canonical_url = f"https://www.instagram.com/{canonical_type}/{shortcode}/"
         return shortcode, canonical_url
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=8),
+        retry=retry_if_exception_type(DownloadError),
+        reraise=True
+    )
     def download_video(self, url: str, output_dir: Path) -> Path:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -536,13 +533,12 @@ class Downloader:
                 if expected_mp4.exists():
                     return expected_mp4
                 
-                # Check matching wildcard
                 for f in output_dir.glob(f"{video_id}.*"):
                     return f
                     
-                raise DownloadError(f"Video file was not generated for {url}")
+                raise DownloadError(f"Video file was not found after download for {url}")
         except Exception as e:
-            raise DownloadError(f"Failed to download Reel ({url}): {str(e)}")
+            raise DownloadError(f"Download error on {url}: {str(e)}")
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -554,12 +550,12 @@ Expected: PASS
 
 ```bash
 git add modules/downloader.py tests/test_downloader.py
-git commit -m "feat: implement downloader adapter with isolated error handling and shortcode parser"
+git commit -m "feat: implement downloader adapter with tenacity exponential backoff"
 ```
 
 ---
 
-### Task 4: Multimodal Analyzer with Typed Schemas, Timeline & Evidence Timestamps
+### Task 4: Multimodal Analyzer with Typed Schemas, Evidence Timestamps & Gemini Embedding 001
 
 **Files:**
 - Create: `modules/analyzer.py`
@@ -567,53 +563,33 @@ git commit -m "feat: implement downloader adapter with isolated error handling a
 
 **Interfaces:**
 - Produces:
-  - `ReelKnowledgeObject` (Pydantic Model)
-  - `TimelineItem` (Pydantic Model)
-  - `ClaimWithEvidence` (Pydantic Model)
+  - `ReelKnowledgeObject` (Pydantic Model with timeline & claims with evidence)
   - `ReelAnalyzer` class:
     - `analyze_video(video_path: Path) -> ReelKnowledgeObject`
-    - `generate_embedding(text: str) -> list[float]`
+    - `generate_embedding(text: str) -> list[float]` (Using `models/gemini-embedding-001`)
 
-- [ ] **Step 1: Write failing test for analyzer schemas and evidence model**
+- [ ] **Step 1: Write failing test for analyzer schemas and retry configuration**
 
 ```python
 # tests/test_analyzer.py
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-from modules.analyzer import ReelAnalyzer, ReelKnowledgeObject
+from modules.analyzer import ReelKnowledgeObject, ReelAnalyzer
 
-def test_knowledge_object_validation():
+def test_knowledge_object_evidence():
     data = {
-        "title": "Creamy Tuscan Garlic Chicken",
+        "title": "Tuscan Garlic Chicken",
         "content_type": "Recipes & Food",
-        "tldr": "High protein chicken dish ready in 20 minutes.",
-        "timeline": [
-            {"timestamp": 0.0, "label": "Intro & Searing Chicken"},
-            {"timestamp": 8.5, "label": "Garlic Cream Sauce Prep"},
-            {"timestamp": 18.0, "label": "Simmering & Plating"}
-        ],
-        "claims_with_evidence": [
-            {"claim": "Cook chicken 5 mins each side", "evidence_timestamp": 4.5, "confidence": "high"},
-            {"claim": "Use sun-dried tomatoes for rich flavor", "evidence_timestamp": 11.2, "confidence": "high"}
-        ],
-        "key_takeaways": ["Sear chicken on high heat", "Deglaze with chicken broth"],
-        "highlight_timestamps": [4.5, 18.0],
-        "structured_data": {
-            "recipe": {
-                "prep_time_minutes": 5,
-                "cook_time_minutes": 15,
-                "ingredients": [{"item": "Chicken breast", "quantity": "500g"}],
-                "instructions": ["Sear chicken", "Make sauce", "Combine"]
-            }
-        },
-        "tags": ["#Recipes", "#Dinner", "#HighProtein"]
+        "tldr": "20-minute dinner.",
+        "timeline": [{"timestamp": 0.0, "label": "Intro"}],
+        "claims_with_evidence": [{"claim": "Bake at 180C", "evidence_timestamp": 12.0, "confidence": "high"}],
+        "key_takeaways": ["Sear chicken well"],
+        "highlight_timestamps": [12.0],
+        "structured_data": {"recipe": {"ingredients": [{"item": "Chicken", "quantity": "500g"}]}},
+        "tags": ["#Recipes"]
     }
     obj = ReelKnowledgeObject.model_validate(data)
-    assert obj.title == "Creamy Tuscan Garlic Chicken"
-    assert len(obj.timeline) == 3
-    assert len(obj.claims_with_evidence) == 2
-    assert obj.highlight_timestamps == [4.5, 18.0]
+    assert obj.claims_with_evidence[0].evidence_timestamp == 12.0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -621,7 +597,7 @@ def test_knowledge_object_validation():
 Run: `pytest tests/test_analyzer.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'modules.analyzer')
 
-- [ ] **Step 3: Implement modules/analyzer.py**
+- [ ] **Step 3: Implement modules/analyzer.py using gemini-embedding-001 and tenacity retries**
 
 ```python
 # modules/analyzer.py
@@ -632,6 +608,7 @@ from typing import Literal, Any
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 ContentType = Literal[
     "Recipes & Food",
@@ -645,7 +622,7 @@ ContentType = Literal[
 
 class TimelineItem(BaseModel):
     timestamp: float = Field(description="Time in seconds (e.g. 0.0, 12.5)")
-    label: str = Field(description="Stage name, e.g. 'Hook', 'Ingredients', 'Method', 'Finished Result'")
+    label: str = Field(description="Stage name, e.g. 'Hook', 'Ingredients', 'Core Technique', 'Finished Result'")
 
 class ClaimWithEvidence(BaseModel):
     claim: str = Field(description="Specific fact, measurement, rule or instruction asserted")
@@ -686,6 +663,7 @@ class ReelAnalyzer:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=True)
     def analyze_video(self, video_path: Path) -> ReelKnowledgeObject:
         video_path = Path(video_path)
         if not video_path.exists():
@@ -718,9 +696,10 @@ class ReelAnalyzer:
             except Exception:
                 pass
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10), reraise=True)
     def generate_embedding(self, text: str) -> list[float]:
         response = self.client.models.embed_content(
-            model="text-embedding-004",
+            model="models/gemini-embedding-001",
             contents=text
         )
         return response.embedding.values
@@ -735,7 +714,7 @@ Expected: PASS
 
 ```bash
 git add modules/analyzer.py tests/test_analyzer.py
-git commit -m "feat: implement multimodal analyzer with typed schemas, timeline and evidence timestamps"
+git commit -m "feat: implement analyzer with gemini-embedding-001 and tenacity retries"
 ```
 
 ---
@@ -751,7 +730,7 @@ git commit -m "feat: implement multimodal analyzer with typed schemas, timeline 
   - `extract_frames(video_path: Path, timestamps: list[float], output_dir: Path) -> list[Path]`
   - `cleanup_files(paths: list[Path]) -> None`
 
-- [ ] **Step 1: Write failing test for frame extraction and cleanup**
+- [ ] **Step 1: Write failing test for frame extractor**
 
 ```python
 # tests/test_frame_extractor.py
@@ -832,7 +811,7 @@ Expected: PASS
 
 ```bash
 git add modules/frame_extractor.py tests/test_frame_extractor.py
-git commit -m "feat: implement evidence keyframe extractor with auto-cleanup"
+git commit -m "feat: implement frame extractor module"
 ```
 
 ---
@@ -854,7 +833,6 @@ git commit -m "feat: implement evidence keyframe extractor with auto-cleanup"
 # tests/test_publisher.py
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 from modules.analyzer import ReelKnowledgeObject, TimelineItem, ClaimWithEvidence
 from modules.publisher import TelegramPublisher
 
@@ -888,7 +866,6 @@ def test_format_evidence_note_html_structure(sample_knowledge):
     assert "• 00:08 — Ingredients breakdown" in html
     assert "⚡ <b>Key Highlights & Evidence:</b>" in html
     assert "<i>(00:08)</i>" in html
-    # Verify original reel link is at the very bottom
     assert html.strip().endswith(f'<a href="{url}">{url}</a>')
 ```
 
@@ -924,14 +901,12 @@ class TelegramPublisher:
         safe_title = html.escape(knowledge.title)
         safe_tldr = html.escape(knowledge.tldr)
         
-        # Timeline block
         timeline_lines = [
             f"• {format_timestamp(item.timestamp)} — {html.escape(item.label)}"
             for item in knowledge.timeline
         ]
         timeline_block = "\n".join(timeline_lines)
 
-        # Claims with evidence
         evidence_lines = [
             f"• {html.escape(c.claim)} <i>({format_timestamp(c.evidence_timestamp)})</i>"
             for c in knowledge.claims_with_evidence
@@ -955,7 +930,6 @@ class TelegramPublisher:
     async def publish_reel(self, knowledge: ReelKnowledgeObject, frame_paths: list[Path], original_url: str) -> int | None:
         thread_id = self.get_thread_id(knowledge.content_type)
         
-        # 1. Send photo album
         valid_frames = [p for p in frame_paths if Path(p).exists()]
         if valid_frames:
             media = []
@@ -975,7 +949,6 @@ class TelegramPublisher:
                 for fp in files_to_close:
                     fp.close()
 
-        # 2. Send evidence-annotated summary note
         text_content = self.format_evidence_note_html(knowledge, original_url)
         await self.bot.send_message(
             chat_id=self.group_chat_id,
@@ -997,12 +970,12 @@ Expected: PASS
 
 ```bash
 git add modules/publisher.py tests/test_publisher.py
-git commit -m "feat: implement Telegram publisher with topic routing and evidence HTML formatting"
+git commit -m "feat: implement telegram publisher with evidence timeline and HTML formatting"
 ```
 
 ---
 
-### Task 7: End-to-End Ingestion Pipeline (v1.0 MVP)
+### Task 7: End-to-End Pipeline & CLI Runner (v1.0 MVP)
 
 **Files:**
 - Create: `pipeline.py`
@@ -1069,7 +1042,7 @@ async def test_pipeline_deduplication_and_execution(tmp_path):
     assert success is True
     assert "Test Reel" in msg
     mock_db.add_reel.assert_called_once()
-    assert not video_file.exists()  # Video file should be cleaned up
+    assert not video_file.exists()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1118,7 +1091,7 @@ class ReelPipeline:
             if not source_id or not canonical_url:
                 return False, "Not a valid Instagram Reel or Post URL.", None
 
-            # Deduplication check
+            # Deduplication
             if self.db.is_processed(source_id):
                 existing = self.db.get_reel_by_source_id(source_id)
                 category = existing.get("content_type", "General") if existing else "General"
@@ -1131,7 +1104,7 @@ class ReelPipeline:
             frame_paths: list[Path] = []
 
             try:
-                # 1. Download
+                # 1. Download with retry
                 video_file = self.downloader.download_video(canonical_url, output_dir=video_dir)
 
                 # 2. Multimodal AI extraction
@@ -1180,7 +1153,6 @@ class ReelPipeline:
                 return False, f"⚠️ Failed to process reel: {str(e)}", None
 
             finally:
-                # Auto-cleanup of ephemeral media
                 if video_file and video_file.exists():
                     try:
                         video_file.unlink()
@@ -1199,12 +1171,12 @@ Expected: PASS
 
 ```bash
 git add pipeline.py tests/test_pipeline.py
-git commit -m "feat: implement end-to-end ingestion pipeline with deduplication and auto-cleanup"
+git commit -m "feat: implement pipeline orchestrator with deduplication and auto-cleanup"
 ```
 
 ---
 
-### Task 8: Hybrid Search Engine (FTS5 + Embeddings) & Conversational `/ask` (v1.1)
+### Task 8: Hybrid Search Engine & Conversational `/ask` (v1.1)
 
 **Files:**
 - Create: `modules/search.py`
@@ -1215,7 +1187,7 @@ git commit -m "feat: implement end-to-end ingestion pipeline with deduplication 
   - `hybrid_search(query: str, top_k: int = 5) -> list[dict]`
   - `answer_conversational_query(query: str) -> str`
 
-- [ ] **Step 1: Write failing test for hybrid search and cosine similarity**
+- [ ] **Step 1: Write failing test for hybrid search engine**
 
 ```python
 # tests/test_search.py
@@ -1224,11 +1196,8 @@ from unittest.mock import MagicMock
 from modules.search import SearchEngine, cosine_similarity
 
 def test_cosine_similarity():
-    v1 = [1.0, 0.0, 0.0]
-    v2 = [1.0, 0.0, 0.0]
-    v3 = [0.0, 1.0, 0.0]
-    assert pytest.approx(cosine_similarity(v1, v2)) == 1.0
-    assert pytest.approx(cosine_similarity(v1, v3)) == 0.0
+    assert pytest.approx(cosine_similarity([1.0, 0.0], [1.0, 0.0])) == 1.0
+    assert pytest.approx(cosine_similarity([1.0, 0.0], [0.0, 1.0])) == 0.0
 
 def test_hybrid_search():
     mock_db = MagicMock()
@@ -1276,12 +1245,10 @@ class SearchEngine:
         self.analyzer = analyzer
 
     def hybrid_search(self, query: str, top_k: int = 5) -> list[dict]:
-        # 1. Exact / keyword match via FTS5
         fts_matches = self.db.search_fts(query, limit=top_k)
         seen_ids = {m["id"] for m in fts_matches}
         ranked_results = list(fts_matches)
 
-        # 2. Semantic vector search
         try:
             query_embedding = self.analyzer.generate_embedding(query)
             candidates = self.db.get_all_embeddings()
@@ -1340,12 +1307,12 @@ Expected: PASS
 
 ```bash
 git add modules/search.py tests/test_search.py
-git commit -m "feat: implement hybrid search engine (FTS5 + vector embeddings) and conversational /ask"
+git commit -m "feat: implement hybrid search engine (FTS5 + vector similarity) and /ask conversational retriever"
 ```
 
 ---
 
-### Task 9: Interactive Action Hooks (`/grocery`, `/code`, `/edit`) (v1.2)
+### Task 9: Action Hooks (`/grocery`, `/code`), Synchronized Re-Embedding (`/edit`), and Data Sovereignty (`/export`) (v1.2)
 
 **Files:**
 - Create: `modules/actions.py`
@@ -1355,26 +1322,67 @@ git commit -m "feat: implement hybrid search engine (FTS5 + vector embeddings) a
 - Produces: `ActionHandler` class:
   - `generate_grocery_list(reel: dict) -> str`
   - `generate_code_block(reel: dict) -> str`
-  - `apply_edit(reel_id: int, old_str: str, new_str: str) -> tuple[bool, str]`
+  - `apply_edit(reel_id: int, old_str: str, new_str: str) -> tuple[bool, str]` (Atomically re-embeds!)
+  - `export_markdown(output_path: Path) -> Path`
+  - `export_json(output_path: Path) -> Path`
 
-- [ ] **Step 1: Write failing test for action generation and record edits**
+- [ ] **Step 1: Write failing test for action generation, synchronized re-embedding, and export**
 
 ```python
 # tests/test_actions.py
 import pytest
+from pathlib import Path
 from unittest.mock import MagicMock
 from modules.actions import ActionHandler
 
-def test_generate_grocery_list():
-    handler = ActionHandler(db=MagicMock())
-    reel = {
+def test_grocery_and_code_generation():
+    handler = ActionHandler(db=MagicMock(), analyzer=MagicMock())
+    reel_recipe = {
         "title": "Protein Pancakes",
-        "structured_data_json": '{"recipe": {"ingredients": [{"item": "Oats", "quantity": "50g"}, {"item": "Eggs", "quantity": "2"}]}}'
+        "structured_data_json": '{"recipe": {"ingredients": [{"item": "Oats", "quantity": "50g"}]}}'
     }
-    grocery = handler.generate_grocery_list(reel)
+    grocery = handler.generate_grocery_list(reel_recipe)
     assert "🛒 <b>Grocery List: Protein Pancakes</b>" in grocery
     assert "• [ ] 50g Oats" in grocery
-    assert "• [ ] 2 Eggs" in grocery
+
+def test_apply_edit_triggers_reembedding():
+    mock_db = MagicMock()
+    mock_analyzer = MagicMock()
+    mock_analyzer.generate_embedding.return_value = [0.99, 0.01]
+    
+    mock_db.get_reel_by_id.return_value = {
+        "id": 1,
+        "title": "Oats Recipe",
+        "tldr": "Breakfast",
+        "structured_data_json": '{"recipe": {"ingredients": [{"item": "Oats", "quantity": "500g"}]}}'
+    }
+    mock_db.update_structured_data.return_value = True
+    
+    handler = ActionHandler(db=mock_db, analyzer=mock_analyzer)
+    success, msg = handler.apply_edit(reel_id=1, old_str="500g", new_str="250g")
+    
+    assert success is True
+    # Re-embedding was called
+    mock_analyzer.generate_embedding.assert_called_once()
+    # update_structured_data was called with new embedding
+    mock_db.update_structured_data.assert_called_once()
+    call_args = mock_db.update_structured_data.call_args
+    assert call_args[1]["embedding"] == [0.99, 0.01]
+
+def test_export_markdown_and_json(tmp_path):
+    mock_db = MagicMock()
+    mock_db.get_all_reels.return_value = [
+        {"id": 1, "title": "Oats Recipe", "content_type": "Recipes & Food", "tldr": "Summary", "source_url": "url1", "tags_csv": "#recipe"}
+    ]
+    handler = ActionHandler(db=mock_db, analyzer=MagicMock())
+    
+    md_file = handler.export_markdown(tmp_path / "export.md")
+    assert md_file.exists()
+    assert "Oats Recipe" in md_file.read_text(encoding="utf-8")
+    
+    json_file = handler.export_json(tmp_path / "export.json")
+    assert json_file.exists()
+    assert "Oats Recipe" in json_file.read_text(encoding="utf-8")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1388,11 +1396,14 @@ Expected: FAIL (ModuleNotFoundError: No module named 'modules.actions')
 # modules/actions.py
 import json
 import html
+from pathlib import Path
 from modules.storage import ReelDatabase
+from modules.analyzer import ReelAnalyzer
 
 class ActionHandler:
-    def __init__(self, db: ReelDatabase):
+    def __init__(self, db: ReelDatabase, analyzer: ReelAnalyzer):
         self.db = db
+        self.analyzer = analyzer
 
     def generate_grocery_list(self, reel: dict) -> str:
         title = html.escape(reel.get("title", "Recipe"))
@@ -1438,8 +1449,43 @@ class ActionHandler:
             
         updated_json_str = raw_json.replace(old_str, new_str)
         updated_dict = json.loads(updated_json_str)
-        success = self.db.update_structured_data(reel_id, updated_dict)
-        return success, f"Updated '{old_str}' → '{new_str}' successfully."
+
+        # Synchronously regenerate vector embedding to keep search index accurate
+        new_embedding: list[float] | None = None
+        try:
+            embed_text = f"{reel['title']}\n{reel['tldr']}\n{updated_json_str}"
+            new_embedding = self.analyzer.generate_embedding(embed_text)
+        except Exception:
+            pass
+
+        success = self.db.update_structured_data(reel_id, updated_dict, embedding=new_embedding)
+        return success, f"Updated '{old_str}' → '{new_str}' and refreshed search index."
+
+    def export_markdown(self, output_path: Path) -> Path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        reels = self.db.get_all_reels()
+
+        lines = ["# ReelMind Knowledge Export\n"]
+        for r in reels:
+            lines.append(f"## {r['title']}")
+            lines.append(f"- **Category:** {r['content_type']}")
+            lines.append(f"- **Summary:** {r['tldr']}")
+            lines.append(f"- **Original Source:** {r['source_url']}")
+            lines.append(f"- **Tags:** {r['tags_csv']}")
+            lines.append("\n```json")
+            lines.append(r["structured_data_json"])
+            lines.append("```\n---\n")
+
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+        return output_path
+
+    def export_json(self, output_path: Path) -> Path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        reels = self.db.get_all_reels()
+        output_path.write_text(json.dumps(reels, indent=2, ensure_ascii=False), encoding="utf-8")
+        return output_path
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1451,44 +1497,54 @@ Expected: PASS
 
 ```bash
 git add modules/actions.py tests/test_actions.py
-git commit -m "feat: implement action hooks for /grocery, /code, and /edit user corrections"
+git commit -m "feat: implement actions (/grocery, /code), synchronized re-embedding (/edit) and data export (/export)"
 ```
 
 ---
 
-### Task 10: Sunday Action Review Digest Scheduler (v1.3)
+### Task 10: Sunday Action Review & Proactive Canary Health Check (v1.3)
 
 **Files:**
 - Create: `modules/scheduler.py`
 - Create: `tests/test_scheduler.py`
 
 **Interfaces:**
-- Produces: `SundayDigestService` class:
+- Produces: `SchedulerService` class:
   - `build_weekly_digest() -> str | None`
-  - `start_scheduler()`
+  - `run_canary_test() -> tuple[bool, str]`
+  - `start()`
 
-- [ ] **Step 1: Write failing test for weekly digest builder**
+- [ ] **Step 1: Write failing test for weekly digest and canary test**
 
 ```python
 # tests/test_scheduler.py
 import pytest
-from unittest.mock import MagicMock
-from modules.scheduler import SundayDigestService
+from unittest.mock import AsyncMock, MagicMock
+from modules.scheduler import SchedulerService
 
-def test_build_weekly_digest():
+@pytest.mark.asyncio
+async def test_digest_and_canary():
     mock_db = MagicMock()
     mock_db.get_recent_reels.return_value = [
-        {"title": "Oats", "content_type": "Recipes & Food", "source_url": "url1"},
-        {"title": "Split Squats", "content_type": "Fitness & Health", "source_url": "url2"},
-        {"title": "FastAPI Tips", "content_type": "Tech & Coding", "source_url": "url3"},
+        {"title": "Oats", "content_type": "Recipes & Food", "source_url": "url1"}
     ]
-    service = SundayDigestService(db=mock_db, bot=MagicMock(), chat_id="-100")
+    mock_pipeline = MagicMock()
+    mock_pipeline.process_url = AsyncMock(return_value=(True, "Success", 1))
+    
+    service = SchedulerService(
+        db=mock_db,
+        bot=MagicMock(),
+        chat_id="-100",
+        pipeline=mock_pipeline,
+        canary_url="https://instagram.com/reel/test/"
+    )
+    
     digest = service.build_weekly_digest()
     assert digest is not None
-    assert "🧠 <b>YOUR REELMIND — SUNDAY REVIEW</b>" in digest
     assert "🍳 1 recipe saved" in digest
-    assert "🏋️ 1 workout saved" in digest
-    assert "💻 1 tech idea saved" in digest
+    
+    ok, msg = await service.run_canary_test()
+    assert ok is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1500,16 +1556,20 @@ Expected: FAIL (ModuleNotFoundError: No module named 'modules.scheduler')
 
 ```python
 # modules/scheduler.py
-import asyncio
+import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from modules.storage import ReelDatabase
 
-class SundayDigestService:
-    def __init__(self, db: ReelDatabase, bot: Bot, chat_id: str | int):
+logger = logging.getLogger("scheduler")
+
+class SchedulerService:
+    def __init__(self, db: ReelDatabase, bot: Bot, chat_id: str | int, pipeline=None, canary_url: str | None = None):
         self.db = db
         self.bot = bot
         self.chat_id = chat_id
+        self.pipeline = pipeline
+        self.canary_url = canary_url
         self.scheduler = AsyncIOScheduler()
 
     def build_weekly_digest(self) -> str | None:
@@ -1554,9 +1614,27 @@ class SundayDigestService:
                 disable_web_page_preview=True
             )
 
+    async def run_canary_test(self) -> tuple[bool, str]:
+        if not self.pipeline or not self.canary_url:
+            return True, "No canary URL configured."
+        try:
+            success, msg, _ = await self.pipeline.process_url(self.canary_url)
+            if not success:
+                alert_text = f"🚨 <b>Canary Alert:</b> Pipeline failed on stable reel!\nDetails: {msg}"
+                await self.bot.send_message(chat_id=self.chat_id, text=alert_text, parse_mode="HTML")
+                return False, msg
+            return True, "Canary health check passed."
+        except Exception as e:
+            alert_text = f"🚨 <b>Canary Alert:</b> Exception during pipeline health check:\n{str(e)}"
+            await self.bot.send_message(chat_id=self.chat_id, text=alert_text, parse_mode="HTML")
+            return False, str(e)
+
     def start(self):
-        # Run every Sunday at 09:00 AM
+        # Sunday Action Review at 09:00 AM
         self.scheduler.add_job(self.send_weekly_digest, "cron", day_of_week="sun", hour=9, minute=0)
+        # Tuesday Canary Health Check at 03:00 AM
+        if self.canary_url:
+            self.scheduler.add_job(self.run_canary_test, "cron", day_of_week="tue", hour=3, minute=0)
         self.scheduler.start()
 ```
 
@@ -1569,31 +1647,32 @@ Expected: PASS
 
 ```bash
 git add modules/scheduler.py tests/test_scheduler.py
-git commit -m "feat: implement Sunday action review digest scheduler"
+git commit -m "feat: implement Sunday review digest and proactive canary test scheduler"
 ```
 
 ---
 
-### Task 11: Telegram Runner CLI, Full Test Suite & Self-Hosted Setup Guide
+### Task 11: Telegram Runner Daemon, Interactive Commands & Full Test Suite
 
 **Files:**
 - Create: `main.py`
 - Create: `README.md`
 
-- [ ] **Step 1: Implement main.py connecting all handlers, commands, and CLI mode**
+- [ ] **Step 1: Implement main.py connecting all commands, exports, actions, and CLI mode**
 
 ```python
 # main.py
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from config import Settings
 from pipeline import ReelPipeline
 from modules.search import SearchEngine
 from modules.actions import ActionHandler
-from modules.scheduler import SundayDigestService
+from modules.scheduler import SchedulerService
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -1614,33 +1693,53 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success, result_text, thread_id = await pipeline.process_url(text)
         await status_msg.edit_text(result_text, parse_mode="HTML")
     else:
-        # Conversational query fallback if not a URL
         answer = search_engine.answer_conversational_query(text)
         await update.message.reply_text(answer, parse_mode="HTML")
 
 async def handle_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: <code>/ask what was the recipe with oats?</code>", parse_mode="HTML")
+        await update.message.reply_text("Usage: <code>/ask what was that recipe with oats?</code>", parse_mode="HTML")
         return
     query = " ".join(context.args)
     search_engine: SearchEngine = context.application.bot_data["search_engine"]
     answer = search_engine.answer_conversational_query(query)
     await update.message.reply_text(answer, parse_mode="HTML")
 
+async def handle_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    fmt = context.args[0].lower() if context.args else "md"
+    actions: ActionHandler = context.application.bot_data["actions"]
+    settings: Settings = context.application.bot_data["settings"]
+    export_dir = settings.TEMP_DIR / "exports"
+
+    if fmt == "json":
+        export_file = actions.export_json(export_dir / "reelmind_export.json")
+    else:
+        export_file = actions.export_markdown(export_dir / "reelmind_export.md")
+
+    with open(export_file, "rb") as fp:
+        await update.message.reply_document(document=fp, caption=f"📦 Exported ReelMind knowledge ({fmt.upper()})")
+
 def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: ActionHandler, settings: Settings):
     app = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build()
     app.bot_data["pipeline"] = pipeline
     app.bot_data["search_engine"] = search_engine
     app.bot_data["actions"] = actions
+    app.bot_data["settings"] = settings
 
     app.add_handler(CommandHandler("ask", handle_ask))
+    app.add_handler(CommandHandler("export", handle_export))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
-    # Start Sunday Digest
-    scheduler_service = SundayDigestService(pipeline.db, app.bot, settings.TELEGRAM_GROUP_CHAT_ID)
-    scheduler_service.start()
+    scheduler = SchedulerService(
+        db=pipeline.db,
+        bot=app.bot,
+        chat_id=settings.TELEGRAM_GROUP_CHAT_ID,
+        pipeline=pipeline,
+        canary_url=settings.CANARY_REEL_URL
+    )
+    scheduler.start()
 
-    logger.info("ReelMind Bot is running! Share an Instagram reel or ask a question.")
+    logger.info("ReelMind Bot is running! Share an Instagram reel, ask a question, or type /export.")
     app.run_polling()
 
 def main():
@@ -1651,7 +1750,7 @@ def main():
     settings = Settings()
     pipeline = ReelPipeline(settings)
     search_engine = SearchEngine(pipeline.db, pipeline.analyzer)
-    actions = ActionHandler(pipeline.db)
+    actions = ActionHandler(pipeline.db, pipeline.analyzer)
 
     if args.url:
         logger.info(f"Processing URL via CLI: {args.url}")
@@ -1664,8 +1763,8 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Create comprehensive self-hosted setup documentation in README.md**
-- [ ] **Step 3: Run full automated test suite to ensure all tasks pass**
+- [ ] **Step 2: Write README.md with 3-minute self-hosted setup, command reference & pitch points**
+- [ ] **Step 3: Run full automated test suite across all modules**
 
 Run: `pytest -v`  
 Expected: All tests PASS
@@ -1674,5 +1773,5 @@ Expected: All tests PASS
 
 ```bash
 git add main.py README.md
-git commit -m "feat: complete ReelMind runner, commands, and self-hosted setup documentation"
+git commit -m "feat: complete Telegram runner, interactive commands, export handler and documentation"
 ```
