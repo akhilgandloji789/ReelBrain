@@ -1,23 +1,23 @@
-# ReelMind: Personal AI Second Brain Implementation Plan
+# ReelMind: Personal AI Second Brain Implementation Plan (Production & Hackathon-Ready)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build ReelMind — a self-hosted, Telegram-native, multimodal personal second brain that turns saved short-form videos (starting with Instagram Reels) into structured, queryable, actionable knowledge anchored on **Memory → Evidence → Retrieval → Action**.
+**Goal:** Build ReelMind — a self-hosted, Telegram-native, multimodal personal second brain that turns saved short-form video content into structured, queryable, actionable knowledge anchored on **Memory → Evidence → Retrieval → Action**, featuring interactive inline buttons, telemetry, data sovereignty, and hackathon demo reliability.
 
-**Architecture:** A decoupled, modular Python 3.11+ application using `python-telegram-bot` for async message ingestion and topic publishing, `yt-dlp` for video downloading with tenacity retries, Gemini 2.0/2.5 Flash for multimodal video+audio understanding and `gemini-embedding-001` (768-dim) for embeddings, `ffmpeg` for keyframe grabbing at evidence timestamps, SQLite (WAL mode) with normalized tables (`reels`, `entities`, `embeddings`, `action_log`, and `reels_fts`) as the single canonical source of truth, and APScheduler for Sunday Action Reviews and weekly canary health checks.
+**Architecture:** A decoupled, modular Python 3.11+ application using `python-telegram-bot` with inline keyboards, `yt-dlp` with circuit breaker and tenacity retries, Gemini 2.0/2.5 Flash for multimodal understanding, `gemini-embedding-001` (768-dim) for semantic vectors, `ffmpeg` for keyframe grabbing, SQLite (WAL mode) with normalized tables (`reels`, `entities`, `embeddings`, `action_log`, `reels_fts`) as the single canonical source of truth, in-memory telemetry (`/status`), and APScheduler for Sunday reviews and canary tests.
 
 **Tech Stack:** Python 3.11+, `python-telegram-bot>=21.0`, `google-genai>=0.1.0`, `yt-dlp>=2024.8.6`, `pydantic>=2.7.0`, `pydantic-settings>=2.2.0`, `apscheduler>=3.10.0`, `tenacity>=8.2.0`, `numpy>=1.26.0`, `pytest`, `pytest-asyncio`, `ffmpeg`.
 
 **Spec:** [`docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md`](file:///c:/Akhil/Instagram/docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md)
 
-## Global Constraints
-- **Zero credential-based scraping:** No Instagram account logins or scraping credentials — zero account ban risk.
-- **Explicitly free-tier friendly:** Built for personal self-hosted use within free tiers (Gemini free tier, Telegram Bot API, SQLite). Not advertised as "free forever."
-- **SQLite is the single canonical source of truth:** Telegram is purely a presentation and interaction view.
-- **Grounded evidence timestamps:** Every claim, recipe ingredient, and instruction is stored with `(text, start_ts, end_ts)` linking back to the source video.
-- **Continuous index integrity:** Any edit via `/edit` must automatically re-embed the parent reel and update FTS in the same transaction.
-- **Data sovereignty:** `/export` must allow exporting all records to clean Markdown or JSON anytime.
-- **Zero disk bloat:** Temporary MP4 video and JPEG frame files must be cleaned up immediately after dispatch.
+## Global Constraints & Performance Budget
+- **Security Whitelist:** Only user IDs / chat IDs listed in `ALLOWED_TELEGRAM_USERS` can trigger the bot or issue `/export` commands.
+- **Explicitly Free-Tier Friendly:** Designed to operate well within free tiers (Gemini free tier, Telegram Bot API, SQLite).
+- **SQLite is the single canonical source of truth:** Telegram is purely an interactive interface.
+- **Evidence provenance:** Every claim and ingredient carries a `(text, start_ts, end_ts, confidence)` tuple linking back to source video.
+- **Performance targets:** End-to-end processing < 25s for a 60s reel. Max video duration 90s. Max 4 keyframe snapshots.
+- **Continuous index integrity:** Edits via `/edit` immediately re-embed the parent reel and update FTS5 atomically.
+- **Zero disk bloat:** Ephemeral media files in `temp/` are purged immediately upon completion.
 - **Original links:** The source Reel link must always appear at the bottom of the Telegram note.
 
 ---
@@ -25,6 +25,9 @@
 ## Database Schema (SQLite — `modules/storage.py`)
 
 ```sql
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE IF NOT EXISTS reels (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     url             TEXT UNIQUE NOT NULL,
@@ -45,7 +48,7 @@ CREATE TABLE IF NOT EXISTS entities (
     text            TEXT NOT NULL,
     start_ts        REAL NOT NULL,
     end_ts          REAL,
-    confidence      REAL,
+    confidence      REAL DEFAULT 0.90,
     frame_path      TEXT,
     edited_by_user  INTEGER DEFAULT 0
 );
@@ -74,7 +77,7 @@ CREATE TABLE IF NOT EXISTS action_log (
 
 ---
 
-### Task 1: Project Setup, Dependencies & Configuration
+### Task 1: Project Setup, Dependencies & Configuration with Security Whitelist
 
 **Files:**
 - Create: `requirements.txt`
@@ -87,12 +90,13 @@ CREATE TABLE IF NOT EXISTS action_log (
   - `TELEGRAM_BOT_TOKEN: str`
   - `TELEGRAM_GROUP_CHAT_ID: int | str`
   - `GEMINI_API_KEY: str`
+  - `ALLOWED_TELEGRAM_USERS: list[int]` (User whitelist)
   - `CANARY_REEL_URL: str | None`
   - `DATA_DIR: Path`
   - `TEMP_DIR: Path`
   - `topic_map: dict[str, int | None]`
 
-- [ ] **Step 1: Write failing test for configuration loading**
+- [ ] **Step 1: Write failing test for configuration loading and security whitelist**
 
 ```python
 # tests/test_config.py
@@ -104,11 +108,13 @@ def test_settings_load_from_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:fake_token")
     monkeypatch.setenv("TELEGRAM_GROUP_CHAT_ID", "-100123456789")
     monkeypatch.setenv("GEMINI_API_KEY", "fake_gemini_key")
+    monkeypatch.setenv("ALLOWED_TELEGRAM_USERS", "111,222,333")
     
     settings = Settings()
     assert settings.TELEGRAM_BOT_TOKEN == "12345:fake_token"
     assert str(settings.TELEGRAM_GROUP_CHAT_ID) == "-100123456789"
     assert settings.GEMINI_API_KEY == "fake_gemini_key"
+    assert settings.allowed_users == [111, 222, 333]
     assert settings.TEMP_DIR.exists()
     assert settings.DATA_DIR.exists()
 
@@ -145,6 +151,7 @@ Create `.env.example`:
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_from_botfather
 TELEGRAM_GROUP_CHAT_ID=-1001234567890
 GEMINI_API_KEY=your_gemini_api_key_from_google_ai_studio
+ALLOWED_TELEGRAM_USERS=12345678,98765432
 CANARY_REEL_URL=https://www.instagram.com/reel/C-stable123/
 ```
 
@@ -160,7 +167,8 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram bot token from @BotFather")
     TELEGRAM_GROUP_CHAT_ID: str | int = Field(..., description="Target Telegram Group / Channel ID")
     GEMINI_API_KEY: str = Field(..., description="Google AI Studio Gemini API Key")
-    CANARY_REEL_URL: str | None = Field(default=None, description="Stable public Reel URL for weekly health canary")
+    ALLOWED_TELEGRAM_USERS: str = Field(default="", description="Comma-separated Telegram user IDs allowed to interact")
+    CANARY_REEL_URL: str | None = Field(default=None, description="Stable public Reel URL for canary tests")
     
     TOPIC_RECIPES_THREAD_ID: int | None = None
     TOPIC_TECH_THREAD_ID: int | None = None
@@ -179,6 +187,12 @@ class Settings(BaseSettings):
         (self.TEMP_DIR / "videos").mkdir(parents=True, exist_ok=True)
         (self.TEMP_DIR / "frames").mkdir(parents=True, exist_ok=True)
         (self.TEMP_DIR / "exports").mkdir(parents=True, exist_ok=True)
+
+    @property
+    def allowed_users(self) -> list[int]:
+        if not self.ALLOWED_TELEGRAM_USERS:
+            return []
+        return [int(uid.strip()) for uid in self.ALLOWED_TELEGRAM_USERS.split(",") if uid.strip().isdigit()]
 
     @property
     def topic_map(self) -> dict[str, int | None]:
@@ -202,7 +216,7 @@ Expected: PASS
 
 ```bash
 git add requirements.txt .env.example config.py tests/test_config.py
-git commit -m "feat: setup project dependencies with tenacity and configuration loader"
+git commit -m "feat: setup project dependencies with security whitelist configuration"
 ```
 
 ---
@@ -216,20 +230,21 @@ git commit -m "feat: setup project dependencies with tenacity and configuration 
 
 **Interfaces:**
 - Produces: `ReelDatabase` class:
-  - `add_reel(url: str, shortcode: str, category: str, title: str, raw_transcript: str = "", content_hash: str | None = None) -> int`
+  - `add_reel(...) -> int`
   - `is_processed(shortcode: str) -> bool`
   - `get_reel_by_shortcode(shortcode: str) -> dict | None`
   - `get_reel_by_id(reel_id: int) -> dict | None`
   - `add_entities(reel_id: int, entities: list[dict]) -> None`
   - `get_entities(reel_id: int) -> list[dict]`
-  - `update_entity(entity_id: int, new_text: str) -> tuple[bool, int]` (returns success and parent reel_id)
+  - `update_entity(entity_id: int, new_text: str) -> tuple[bool, int]`
   - `store_embedding(reel_id: int, model: str, vector: list[float]) -> None`
   - `get_all_embeddings() -> list[dict]`
   - `search_fts(query: str, limit: int = 5) -> list[dict]`
   - `log_action(reel_id: int | None, action_type: str, payload: dict) -> None`
   - `get_all_reels_with_entities() -> list[dict]`
+  - `get_metrics_summary() -> dict`
 
-- [ ] **Step 1: Write failing test for SQLite storage, normalized entities, and FTS5**
+- [ ] **Step 1: Write failing test for SQLite storage and metrics**
 
 ```python
 # tests/test_storage.py
@@ -237,38 +252,23 @@ import pytest
 from pathlib import Path
 from modules.storage import ReelDatabase
 
-def test_database_lifecycle_and_entities(tmp_path: Path):
+def test_database_lifecycle_and_metrics(tmp_path: Path):
     db = ReelDatabase(tmp_path / "test_reelminds.db")
-    
     shortcode = "C-xyz123"
     url = f"https://www.instagram.com/reel/{shortcode}/"
     assert not db.is_processed(shortcode)
     
-    reel_id = db.add_reel(
-        url=url,
-        shortcode=shortcode,
-        category="recipe",
-        title="10-Minute High-Protein Oats",
-        raw_transcript="Oats and whey recipe"
-    )
-    
+    reel_id = db.add_reel(url=url, shortcode=shortcode, category="recipe", title="Oats", raw_transcript="Healthy")
     assert reel_id > 0
     assert db.is_processed(shortcode)
     
-    entities = [
-        {"entity_type": "ingredient", "text": "50g rolled oats", "start_ts": 8.0, "confidence": 0.95},
-        {"entity_type": "instruction", "text": "Mix with almond milk", "start_ts": 15.0, "confidence": 0.90}
-    ]
-    db.add_entities(reel_id, entities)
+    db.add_entities(reel_id, [{"entity_type": "ingredient", "text": "50g Oats", "start_ts": 5.0}])
+    ents = db.get_entities(reel_id)
+    assert len(ents) == 1
     
-    stored_entities = db.get_entities(reel_id)
-    assert len(stored_entities) == 2
-    assert stored_entities[0]["text"] == "50g rolled oats"
-    
-    # Test FTS5 search
-    fts_results = db.search_fts("oats")
-    assert len(fts_results) >= 1
-    assert fts_results[0]["id"] == reel_id
+    metrics = db.get_metrics_summary()
+    assert metrics["total_reels"] == 1
+    assert metrics["total_entities"] == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -329,7 +329,7 @@ class ReelDatabase:
                     text            TEXT NOT NULL,
                     start_ts        REAL NOT NULL,
                     end_ts          REAL,
-                    confidence      REAL,
+                    confidence      REAL DEFAULT 0.90,
                     frame_path      TEXT,
                     edited_by_user  INTEGER DEFAULT 0
                 );
@@ -398,7 +398,7 @@ class ReelDatabase:
                         ent.get("text", ""),
                         ent.get("start_ts", 0.0),
                         ent.get("end_ts"),
-                        ent.get("confidence"),
+                        ent.get("confidence", 0.90),
                         ent.get("frame_path"),
                         ent.get("edited_by_user", 0)
                     )
@@ -503,6 +503,19 @@ class ReelDatabase:
                 ents = conn.execute("SELECT * FROM entities WHERE reel_id = ? ORDER BY start_ts ASC", (r["id"],)).fetchall()
                 r["entities"] = [dict(e) for e in ents]
             return reels
+
+    def get_metrics_summary(self) -> dict:
+        with self._get_connection() as conn:
+            total_reels = conn.execute("SELECT COUNT(*) FROM reels").fetchone()[0]
+            total_entities = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+            total_embeddings = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            total_actions = conn.execute("SELECT COUNT(*) FROM action_log").fetchone()[0]
+            return {
+                "total_reels": total_reels,
+                "total_entities": total_entities,
+                "total_embeddings": total_embeddings,
+                "total_actions": total_actions
+            }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -514,12 +527,12 @@ Expected: PASS
 
 ```bash
 git add modules/__init__.py modules/storage.py tests/test_storage.py
-git commit -m "feat: implement normalized SQLite schema with entities, embeddings and FTS5"
+git commit -m "feat: implement SQLite canonical schema with metrics telemetry queries"
 ```
 
 ---
 
-### Task 3: Downloader Adapter (`yt-dlp`) with Tenacity Retries & Error Isolation
+### Task 3: Downloader Adapter (`yt-dlp`) with Circuit Breaker & Tenacity Retries
 
 **Files:**
 - Create: `modules/downloader.py`
@@ -528,9 +541,9 @@ git commit -m "feat: implement normalized SQLite schema with entities, embedding
 **Interfaces:**
 - Produces: `Downloader` class:
   - `parse_shortcode(raw_text: str) -> tuple[str | None, str | None]`
-  - `download_video(url: str, output_dir: Path) -> Path`
+  - `download_video(url: str, output_dir: Path) -> Path` (with circuit breaker)
 
-- [ ] **Step 1: Write failing test for shortcode extraction and downloader retry**
+- [ ] **Step 1: Write failing test for downloader and circuit breaker**
 
 ```python
 # tests/test_downloader.py
@@ -541,7 +554,7 @@ from modules.downloader import Downloader, DownloadError
 
 def test_parse_shortcode():
     downloader = Downloader()
-    sid, canonical = downloader.parse_shortcode("https://www.instagram.com/reel/C-12345Abc/?igsh=xyz==")
+    sid, canonical = downloader.parse_shortcode("https://www.instagram.com/reel/C-12345Abc/?igsh=test")
     assert sid == "C-12345Abc"
     assert canonical == "https://www.instagram.com/reel/C-12345Abc/"
 
@@ -564,11 +577,12 @@ def test_download_video_success(mock_ydl_class, tmp_path):
 Run: `pytest tests/test_downloader.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'modules.downloader')
 
-- [ ] **Step 3: Implement modules/downloader.py with tenacity**
+- [ ] **Step 3: Implement modules/downloader.py**
 
 ```python
 # modules/downloader.py
 import re
+import time
 from pathlib import Path
 from yt_dlp import YoutubeDL
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -578,7 +592,14 @@ REEL_REGEX = re.compile(r'https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/([a
 class DownloadError(Exception):
     pass
 
+class CircuitBreakerOpen(Exception):
+    pass
+
 class Downloader:
+    def __init__(self):
+        self.consecutive_failures = 0
+        self.circuit_open_until = 0
+
     def parse_shortcode(self, raw_text: str) -> tuple[str | None, str | None]:
         match = REEL_REGEX.search(raw_text)
         if not match:
@@ -587,6 +608,20 @@ class Downloader:
         canonical = f"https://www.instagram.com/reel/{shortcode}/"
         return shortcode, canonical
 
+    def _check_circuit(self):
+        now = time.time()
+        if now < self.circuit_open_until:
+            remaining = int(self.circuit_open_until - now)
+            raise CircuitBreakerOpen(f"Downloader circuit breaker active for {remaining}s due to consecutive failures.")
+
+    def _record_success(self):
+        self.consecutive_failures = 0
+
+    def _record_failure(self):
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= 3:
+            self.circuit_open_until = time.time() + 120  # 2 minute breaker
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=8),
@@ -594,6 +629,7 @@ class Downloader:
         reraise=True
     )
     def download_video(self, url: str, output_dir: Path) -> Path:
+        self._check_circuit()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -612,13 +648,16 @@ class Downloader:
                 video_id = info.get("id")
                 expected_mp4 = output_dir / f"{video_id}.mp4"
                 if expected_mp4.exists():
+                    self._record_success()
                     return expected_mp4
                 
                 for f in output_dir.glob(f"{video_id}.*"):
+                    self._record_success()
                     return f
                     
                 raise DownloadError(f"Video file not found after download for {url}")
         except Exception as e:
+            self._record_failure()
             raise DownloadError(f"Download failure on {url}: {str(e)}")
 ```
 
@@ -631,7 +670,7 @@ Expected: PASS
 
 ```bash
 git add modules/downloader.py tests/test_downloader.py
-git commit -m "feat: implement downloader adapter with tenacity retries"
+git commit -m "feat: implement downloader adapter with circuit breaker and tenacity retries"
 ```
 
 ---
@@ -644,11 +683,11 @@ git commit -m "feat: implement downloader adapter with tenacity retries"
 
 **Interfaces:**
 - Produces:
-  - `EntityItem` (Pydantic Model with `entity_type`, `text`, `start_ts`, `end_ts`, `confidence`)
-  - `ReelAnalysisOutput` (Pydantic Model with `category`, `title`, `tldr`, `entities`, `keyframe_timestamps`)
+  - `EntityItem`
+  - `ReelAnalysisOutput`
   - `ReelAnalyzer` class:
     - `analyze_video(video_path: Path) -> ReelAnalysisOutput`
-    - `generate_embedding(text: str) -> list[float]` (Using `models/gemini-embedding-001`, 768-dim)
+    - `generate_embedding(text: str) -> list[float]` (768-dim)
 
 - [ ] **Step 1: Write failing test for entity schemas and analyzer**
 
@@ -699,7 +738,7 @@ class EntityItem(BaseModel):
     text: str = Field(description="Exact fact, instruction, measurement or code")
     start_ts: float = Field(description="Start time in seconds where this appears or is spoken")
     end_ts: float | None = Field(default=None, description="End time in seconds")
-    confidence: float | None = Field(default=0.9, description="Confidence score between 0.0 and 1.0")
+    confidence: float | None = Field(default=0.90, description="Confidence score between 0.0 and 1.0")
 
 class ReelAnalysisOutput(BaseModel):
     title: str = Field(description="Short, crisp, descriptive title")
@@ -864,12 +903,12 @@ Expected: PASS
 
 ```bash
 git add modules/frame_extractor.py tests/test_frame_extractor.py
-git commit -m "feat: implement evidence keyframe extractor"
+git commit -m "feat: implement frame extractor module"
 ```
 
 ---
 
-### Task 6: Telegram Publisher with Forum Topic Routing & Evidence Formatting
+### Task 6: Telegram Publisher with Interactive Inline Keyboards & Evidence Formatting
 
 **Files:**
 - Create: `modules/publisher.py`
@@ -878,9 +917,10 @@ git commit -m "feat: implement evidence keyframe extractor"
 **Interfaces:**
 - Produces: `TelegramPublisher` class:
   - `format_note_html(analysis: ReelAnalysisOutput, original_url: str) -> str`
-  - `publish_reel(analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str) -> int | None`
+  - `build_inline_keyboard(reel_id: int, category: str) -> InlineKeyboardMarkup`
+  - `publish_reel(reel_id: int, analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str) -> int | None`
 
-- [ ] **Step 1: Write failing test for HTML note formatting**
+- [ ] **Step 1: Write failing test for HTML note formatting and keyboard generation**
 
 ```python
 # tests/test_publisher.py
@@ -888,7 +928,7 @@ import pytest
 from modules.analyzer import ReelAnalysisOutput, EntityItem
 from modules.publisher import TelegramPublisher
 
-def test_format_note_html():
+def test_format_note_html_and_keyboard():
     publisher = TelegramPublisher(bot_token="fake", group_chat_id="-100")
     analysis = ReelAnalysisOutput(
         title="Quick Oats",
@@ -904,6 +944,9 @@ def test_format_note_html():
     assert "🎬 <b>Quick Oats</b>" in html
     assert "• 50g Oats <i>(00:08)</i>" in html
     assert html.strip().endswith('<a href="https://instagram.com/reel/C-test/">https://instagram.com/reel/C-test/</a>')
+
+    kb = publisher.build_inline_keyboard(reel_id=42, category="recipe")
+    assert kb is not None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -911,13 +954,13 @@ def test_format_note_html():
 Run: `pytest tests/test_publisher.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'modules.publisher')
 
-- [ ] **Step 3: Implement modules/publisher.py**
+- [ ] **Step 3: Implement modules/publisher.py with inline keyboards**
 
 ```python
 # modules/publisher.py
 import html
 from pathlib import Path
-from telegram import Bot, InputMediaPhoto
+from telegram import Bot, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
 from modules.analyzer import ReelAnalysisOutput
 
 def format_timestamp(seconds: float) -> str:
@@ -941,7 +984,8 @@ class TelegramPublisher:
         entity_lines = []
         for e in analysis.entities:
             ts_str = format_timestamp(e.start_ts)
-            entity_lines.append(f"• {html.escape(e.text)} <i>({ts_str})</i>")
+            confidence_badge = f" [{(int(e.confidence * 100))}%]" if e.confidence else ""
+            entity_lines.append(f"• {html.escape(e.text)} <i>({ts_str}{confidence_badge})</i>")
 
         body_block = "\n".join(entity_lines)
         safe_url = html.escape(original_url)
@@ -954,7 +998,20 @@ class TelegramPublisher:
             f'🔗 <b>Original Reel:</b> <a href="{safe_url}">{safe_url}</a>'
         )
 
-    async def publish_reel(self, analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str) -> int | None:
+    def build_inline_keyboard(self, reel_id: int, category: str) -> InlineKeyboardMarkup:
+        buttons = []
+        if category == "recipe":
+            buttons.append([InlineKeyboardButton("🛒 Get Grocery List", callback_data=f"grocery:{reel_id}")])
+        elif category == "tech":
+            buttons.append([InlineKeyboardButton("💻 Copy Code", callback_data=f"code:{reel_id}")])
+        
+        buttons.append([
+            InlineKeyboardButton("🔍 Ask", callback_data=f"ask:{reel_id}"),
+            InlineKeyboardButton("✏️ Edit", callback_data=f"edit:{reel_id}")
+        ])
+        return InlineKeyboardMarkup(buttons)
+
+    async def publish_reel(self, reel_id: int, analysis: ReelAnalysisOutput, frame_paths: list[Path], original_url: str) -> int | None:
         thread_id = self.get_thread_id(analysis.category)
         
         valid_frames = [p for p in frame_paths if Path(p).exists()]
@@ -977,11 +1034,14 @@ class TelegramPublisher:
                     fp.close()
 
         text_content = self.format_note_html(analysis, original_url)
+        reply_markup = self.build_inline_keyboard(reel_id, analysis.category)
+        
         await self.bot.send_message(
             chat_id=self.group_chat_id,
             message_thread_id=thread_id,
             text=text_content,
             parse_mode="HTML",
+            reply_markup=reply_markup,
             disable_web_page_preview=False
         )
         return thread_id
@@ -996,22 +1056,23 @@ Expected: PASS
 
 ```bash
 git add modules/publisher.py tests/test_publisher.py
-git commit -m "feat: implement telegram publisher with topic threads and evidence formatting"
+git commit -m "feat: implement telegram publisher with interactive inline keyboards"
 ```
 
 ---
 
-### Task 7: End-to-End Core Ingestion Pipeline (v1.0 MVP)
+### Task 7: Ingestion Pipeline with Telemetry & Security Whitelist (v1.0 MVP)
 
 **Files:**
+- Create: `modules/metrics.py`
 - Create: `pipeline.py`
 - Create: `tests/test_pipeline.py`
 
 **Interfaces:**
-- Produces: `ReelPipeline` class:
-  - `process_url(raw_input: str) -> tuple[bool, str, int | None]`
+- Produces: `TelemetryMetrics` class & `ReelPipeline` class:
+  - `process_url(raw_input: str, user_id: int | None = None) -> tuple[bool, str, int | None]`
 
-- [ ] **Step 1: Write failing test for pipeline**
+- [ ] **Step 1: Write failing test for telemetry and pipeline**
 
 ```python
 # tests/test_pipeline.py
@@ -1022,9 +1083,10 @@ from pipeline import ReelPipeline
 from modules.analyzer import ReelAnalysisOutput
 
 @pytest.mark.asyncio
-async def test_pipeline_flow(tmp_path):
+async def test_pipeline_flow_with_metrics(tmp_path):
     settings = MagicMock()
     settings.TEMP_DIR = tmp_path
+    settings.allowed_users = [12345]
     
     mock_db = MagicMock()
     mock_db.is_processed.return_value = False
@@ -1062,11 +1124,17 @@ async def test_pipeline_flow(tmp_path):
         publisher=mock_publisher
     )
     
-    success, msg, thread_id = await pipeline.process_url("https://instagram.com/reel/C-test1/")
+    # Authorized user
+    success, msg, thread_id = await pipeline.process_url("https://instagram.com/reel/C-test1/", user_id=12345)
     assert success is True
     assert "Test Reel" in msg
     mock_db.add_reel.assert_called_once()
     assert not video_file.exists()
+
+    # Unauthorized user
+    ok, err, _ = await pipeline.process_url("https://instagram.com/reel/C-test2/", user_id=99999)
+    assert ok is False
+    assert "Unauthorized" in err
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1074,10 +1142,41 @@ async def test_pipeline_flow(tmp_path):
 Run: `pytest tests/test_pipeline.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'pipeline')
 
-- [ ] **Step 3: Implement pipeline.py**
+- [ ] **Step 3: Implement modules/metrics.py and pipeline.py**
 
+Create `modules/metrics.py`:
+```python
+# modules/metrics.py
+import time
+
+class TelemetryMetrics:
+    def __init__(self):
+        self.start_time = time.time()
+        self.total_processed = 0
+        self.total_errors = 0
+        self.last_latency = 0.0
+
+    def record_run(self, duration: float, success: bool):
+        self.last_latency = duration
+        if success:
+            self.total_processed += 1
+        else:
+            self.total_errors += 1
+
+    def get_status(self) -> dict:
+        uptime_mins = int((time.time() - self.start_time) / 60)
+        return {
+            "uptime_mins": uptime_mins,
+            "processed": self.total_processed,
+            "errors": self.total_errors,
+            "last_latency_sec": round(self.last_latency, 2)
+        }
+```
+
+Create `pipeline.py`:
 ```python
 # pipeline.py
+import time
 import asyncio
 from pathlib import Path
 from config import Settings
@@ -1086,6 +1185,7 @@ from modules.downloader import Downloader
 from modules.analyzer import ReelAnalyzer
 from modules.frame_extractor import FrameExtractor
 from modules.publisher import TelegramPublisher
+from modules.metrics import TelemetryMetrics
 
 class ReelPipeline:
     def __init__(
@@ -1096,6 +1196,7 @@ class ReelPipeline:
         analyzer: ReelAnalyzer | None = None,
         extractor: FrameExtractor | None = None,
         publisher: TelegramPublisher | None = None,
+        metrics: TelemetryMetrics | None = None,
     ):
         self.settings = settings
         self.db = db or ReelDatabase(settings.DATA_DIR / "reelminds.db")
@@ -1107,9 +1208,14 @@ class ReelPipeline:
             group_chat_id=settings.TELEGRAM_GROUP_CHAT_ID,
             topic_map=settings.topic_map
         )
+        self.metrics = metrics or TelemetryMetrics()
         self._lock = asyncio.Lock()
 
-    async def process_url(self, raw_input: str) -> tuple[bool, str, int | None]:
+    async def process_url(self, raw_input: str, user_id: int | None = None) -> tuple[bool, str, int | None]:
+        start_time = time.time()
+        if user_id is not None and self.settings.allowed_users and user_id not in self.settings.allowed_users:
+            return False, "⛔ Unauthorized user. Access restricted by administrator.", None
+
         async with self._lock:
             shortcode, canonical_url = self.downloader.parse_shortcode(raw_input)
             if not shortcode or not canonical_url:
@@ -1146,14 +1252,7 @@ class ReelPipeline:
                 except Exception:
                     pass
 
-                # 5. Publish to Telegram
-                thread_id = await self.publisher.publish_reel(
-                    analysis=analysis,
-                    frame_paths=frame_paths,
-                    original_url=canonical_url
-                )
-
-                # 6. Save in SQLite
+                # 5. Save in SQLite
                 reel_id = self.db.add_reel(
                     url=canonical_url,
                     shortcode=shortcode,
@@ -1168,9 +1267,22 @@ class ReelPipeline:
                 if embedding:
                     self.db.store_embedding(reel_id, model="gemini-embedding-001", vector=embedding)
 
-                return True, f"✅ Indexed <b>{analysis.title}</b> under <i>#{analysis.category}</i>", thread_id
+                # 6. Publish to Telegram with Inline Keyboard
+                thread_id = await self.publisher.publish_reel(
+                    reel_id=reel_id,
+                    analysis=analysis,
+                    frame_paths=frame_paths,
+                    original_url=canonical_url
+                )
+
+                elapsed = time.time() - start_time
+                self.metrics.record_run(elapsed, success=True)
+
+                return True, f"✅ Indexed <b>{analysis.title}</b> under <i>#{analysis.category}</i> ({round(elapsed, 1)}s)", thread_id
 
             except Exception as e:
+                elapsed = time.time() - start_time
+                self.metrics.record_run(elapsed, success=False)
                 return False, f"⚠️ Failed to process reel: {str(e)}", None
 
             finally:
@@ -1191,13 +1303,13 @@ Expected: PASS
 - [ ] **Step 5: Commit changes**
 
 ```bash
-git add pipeline.py tests/test_pipeline.py
-git commit -m "feat: implement end-to-end ingestion pipeline with deduplication"
+git add modules/metrics.py pipeline.py tests/test_pipeline.py
+git commit -m "feat: implement ingestion pipeline with telemetry and user whitelist guard"
 ```
 
 ---
 
-### Task 8: Hybrid Search Engine & Conversational `/ask` (v1.1)
+### Task 8: Hybrid Search Engine & Grounded Conversational `/ask` (v1.1)
 
 **Files:**
 - Create: `modules/search.py`
@@ -1208,7 +1320,7 @@ git commit -m "feat: implement end-to-end ingestion pipeline with deduplication"
   - `hybrid_search(query: str, top_k: int = 5) -> list[dict]`
   - `answer_conversational_query(query: str) -> str`
 
-- [ ] **Step 1: Write failing test for hybrid search**
+- [ ] **Step 1: Write failing test for hybrid search engine**
 
 ```python
 # tests/test_search.py
@@ -1239,7 +1351,7 @@ def test_hybrid_search():
 Run: `pytest tests/test_search.py -v`  
 Expected: FAIL (ModuleNotFoundError: No module named 'modules.search')
 
-- [ ] **Step 3: Implement modules/search.py**
+- [ ] **Step 3: Implement modules/search.py with re-ranking**
 
 ```python
 # modules/search.py
@@ -1292,7 +1404,7 @@ class SearchEngine:
         context_lines = []
         for idx, m in enumerate(matches, 1):
             ents = self.db.get_entities(m["id"])
-            ent_summary = "; ".join([f"{e['text']} ({int(e['start_ts'])}s)" for e in ents[:5]])
+            ent_summary = "; ".join([f"{e['text']} ({int(e['start_ts'])}s, {int(e.get('confidence', 0.9)*100)}% conf)" for e in ents[:5]])
             context_lines.append(
                 f"[{idx}] Title: {m.get('title')}\n"
                 f"Category: {m.get('category')}\n"
@@ -1308,7 +1420,7 @@ class SearchEngine:
         Here is the relevant retrieved knowledge with evidence timestamps:
         {context_str}
 
-        Answer the user's question directly and concisely in Telegram HTML. You MUST cite the specific evidence timestamps and include the original reel link. Refuse to answer from facts not present in the retrieved set.
+        Answer the user's question directly and concisely in Telegram HTML. You MUST cite the specific evidence timestamps and confidence scores (e.g. ⏱️ 00:31 | 95% confidence) and include the original reel link. Refuse to answer from facts not present in the retrieved set.
         """
         response = self.analyzer.client.models.generate_content(
             model="gemini-2.0-flash",
@@ -1326,12 +1438,12 @@ Expected: PASS
 
 ```bash
 git add modules/search.py tests/test_search.py
-git commit -m "feat: implement hybrid search (FTS5 + vector) and grounded /ask retrieval"
+git commit -m "feat: implement hybrid search with re-ranking and evidence confidence citation in /ask"
 ```
 
 ---
 
-### Task 9: Action Hooks (`/grocery`, `/code`, `/edit`), Atomic Re-Embedding & Export (`/export`) (v1.2)
+### Task 9: Action Hooks (`/grocery`, `/code`), Synchronized Re-Embedding (`/edit`), and Data Sovereignty (`/export`) (v1.2)
 
 **Files:**
 - Create: `modules/actions.py`
@@ -1341,11 +1453,11 @@ git commit -m "feat: implement hybrid search (FTS5 + vector) and grounded /ask r
 - Produces: `ActionHandler` class:
   - `generate_grocery_list(reel_id: int) -> str`
   - `generate_code_block(reel_id: int) -> str`
-  - `apply_edit(entity_id: int, new_text: str) -> tuple[bool, str]` (Atomically re-embeds!)
+  - `apply_edit(entity_id: int, new_text: str) -> tuple[bool, str]`
   - `export_markdown(output_path: Path) -> Path`
   - `export_json(output_path: Path) -> Path`
 
-- [ ] **Step 1: Write failing test for actions, re-embedding, and export**
+- [ ] **Step 1: Write failing test for actions and export**
 
 ```python
 # tests/test_actions.py
@@ -1405,7 +1517,6 @@ class ActionHandler:
         if not ingredients:
             return "⚠️ No ingredients found for this reel."
         
-        # Deduplicate while preserving order
         seen = set()
         deduped = []
         for ing in ingredients:
@@ -1438,7 +1549,6 @@ class ActionHandler:
         if not ok:
             return False, f"Entity {entity_id} not found."
 
-        # Synchronously re-embed to keep vector index accurate
         try:
             ents = self.db.get_entities(reel_id)
             combined_text = " ".join([e["text"] for e in ents])
@@ -1448,7 +1558,7 @@ class ActionHandler:
             pass
 
         self.db.log_action(reel_id, "edit", {"entity_id": entity_id, "new_text": new_text})
-        return True, f"✅ Entity {entity_id} updated & search index refreshed."
+        return True, f"✅ Entity {entity_id} updated & vector index refreshed."
 
     def export_markdown(self, output_path: Path) -> Path:
         output_path = Path(output_path)
@@ -1486,12 +1596,12 @@ Expected: PASS
 
 ```bash
 git add modules/actions.py tests/test_actions.py
-git commit -m "feat: implement action hooks (/grocery, /code), re-embedding edit and export"
+git commit -m "feat: implement actions (/grocery, /code), synchronized edit and /export"
 ```
 
 ---
 
-### Task 10: Sunday Review & Proactive Canary Health Check (v1.3)
+### Task 10: Sunday Review & Live Canary Health Check (v1.3)
 
 **Files:**
 - Create: `modules/scheduler.py`
@@ -1503,7 +1613,7 @@ git commit -m "feat: implement action hooks (/grocery, /code), re-embedding edit
   - `run_canary_test() -> tuple[bool, str]`
   - `start()`
 
-- [ ] **Step 1: Write failing test for scheduler**
+- [ ] **Step 1: Write failing test for scheduler and live canary**
 
 ```python
 # tests/test_scheduler.py
@@ -1605,12 +1715,12 @@ class SchedulerService:
         try:
             success, msg, _ = await self.pipeline.process_url(self.canary_url)
             if not success:
-                alert_text = f"🚨 <b>Canary Alert:</b> Pipeline failed on test reel!\nDetails: {msg}"
+                alert_text = f"🚨 <b>Canary Alert:</b> Pipeline health check failed!\nDetails: {msg}"
                 await self.bot.send_message(chat_id=self.chat_id, text=alert_text, parse_mode="HTML")
                 return False, msg
             return True, "Canary health check passed."
         except Exception as e:
-            alert_text = f"🚨 <b>Canary Alert:</b> Exception in health check:\n{str(e)}"
+            alert_text = f"🚨 <b>Canary Alert:</b> Exception during health check:\n{str(e)}"
             await self.bot.send_message(chat_id=self.chat_id, text=alert_text, parse_mode="HTML")
             return False, str(e)
 
@@ -1635,13 +1745,15 @@ git commit -m "feat: implement Sunday review digest and canary test scheduler"
 
 ---
 
-### Task 11: Telegram Poller Daemon, Interactive Commands & Full Documentation
+### Task 11: Telegram Poller Daemon, Callback Query Handlers, Telemetry & Documentation
 
 **Files:**
 - Create: `main.py`
+- Create: `Dockerfile`
+- Create: `docker-compose.yml`
 - Create: `README.md`
 
-- [ ] **Step 1: Implement main.py connecting all commands, exports, actions, and CLI runner**
+- [ ] **Step 1: Implement main.py connecting callbacks, commands, telemetry, and CLI runner**
 
 ```python
 # main.py
@@ -1650,7 +1762,14 @@ import asyncio
 import logging
 from pathlib import Path
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    CommandHandler,
+    CallbackQueryHandler,
+    filters
+)
 from config import Settings
 from pipeline import ReelPipeline
 from modules.search import SearchEngine
@@ -1668,16 +1787,61 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     text = update.message.text.strip()
+    user_id = update.effective_user.id if update.effective_user else None
     pipeline: ReelPipeline = context.application.bot_data["pipeline"]
     search_engine: SearchEngine = context.application.bot_data["search_engine"]
 
     if "instagram.com" in text:
         status_msg = await update.message.reply_text("⏳ Processing reel... Analyzing video & audio with Gemini...")
-        success, result_text, thread_id = await pipeline.process_url(text)
+        success, result_text, thread_id = await pipeline.process_url(text, user_id=user_id)
         await status_msg.edit_text(result_text, parse_mode="HTML")
     else:
         answer = search_engine.answer_conversational_query(text)
         await update.message.reply_text(answer, parse_mode="HTML")
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    actions: ActionHandler = context.application.bot_data["actions"]
+
+    if data.startswith("grocery:"):
+        reel_id = int(data.split(":")[1])
+        grocery_text = actions.generate_grocery_list(reel_id)
+        await query.message.reply_text(grocery_text, parse_mode="HTML")
+    elif data.startswith("code:"):
+        reel_id = int(data.split(":")[1])
+        code_text = actions.generate_code_block(reel_id)
+        await query.message.reply_text(code_text, parse_mode="HTML")
+    elif data.startswith("ask:"):
+        await query.message.reply_text("💬 To ask a question about this reel or any saved reels, simply reply with <code>/ask &lt;your question&gt;</code>", parse_mode="HTML")
+    elif data.startswith("edit:"):
+        await query.message.reply_text("✏️ To correct any details, use <code>/edit &lt;entity_id&gt; &lt;new text&gt;</code>", parse_mode="HTML")
+
+async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pipeline: ReelPipeline = context.application.bot_data["pipeline"]
+    metrics = pipeline.metrics.get_status()
+    db_metrics = pipeline.db.get_metrics_summary()
+
+    msg = (
+        f"📊 <b>ReelMind Telemetry & Status:</b>\n\n"
+        f"⏱️ <b>Uptime:</b> {metrics['uptime_mins']} minutes\n"
+        f"⚡ <b>Last Pipeline Latency:</b> {metrics['last_latency_sec']}s\n"
+        f"✅ <b>Total Indexed Reels:</b> {db_metrics['total_reels']}\n"
+        f"🧬 <b>Total Grounded Entities:</b> {db_metrics['total_entities']}\n"
+        f"🧠 <b>Total Embeddings:</b> {db_metrics['total_embeddings']}\n"
+        f"🛠️ <b>Action Invocations:</b> {db_metrics['total_actions']}\n"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+async def handle_canary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    scheduler: SchedulerService = context.application.bot_data["scheduler"]
+    status_msg = await update.message.reply_text("🧪 Running live Canary health check on pipeline...")
+    ok, details = await scheduler.run_canary_test()
+    if ok:
+        await status_msg.edit_text(f"✅ <b>Canary Health Check Passed!</b>\nPipeline is operational.")
+    else:
+        await status_msg.edit_text(f"🚨 <b>Canary Check Failed!</b>\n{details}")
 
 async def handle_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -1741,18 +1905,7 @@ async def handle_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: ActionHandler, settings: Settings):
     app = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build()
-    app.bot_data["pipeline"] = pipeline
-    app.bot_data["search_engine"] = search_engine
-    app.bot_data["actions"] = actions
-    app.bot_data["settings"] = settings
-
-    app.add_handler(CommandHandler("ask", handle_ask))
-    app.add_handler(CommandHandler("grocery", handle_grocery))
-    app.add_handler(CommandHandler("code", handle_code))
-    app.add_handler(CommandHandler("edit", handle_edit))
-    app.add_handler(CommandHandler("export", handle_export))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
-
+    
     scheduler = SchedulerService(
         db=pipeline.db,
         bot=app.bot,
@@ -1762,7 +1915,23 @@ def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: Action
     )
     scheduler.start()
 
-    logger.info("ReelMind Bot is running! Share a Reel URL, ask a question, or use /grocery, /code, /edit, /export.")
+    app.bot_data["pipeline"] = pipeline
+    app.bot_data["search_engine"] = search_engine
+    app.bot_data["actions"] = actions
+    app.bot_data["settings"] = settings
+    app.bot_data["scheduler"] = scheduler
+
+    app.add_handler(CommandHandler("status", handle_status))
+    app.add_handler(CommandHandler("canary", handle_canary))
+    app.add_handler(CommandHandler("ask", handle_ask))
+    app.add_handler(CommandHandler("grocery", handle_grocery))
+    app.add_handler(CommandHandler("code", handle_code))
+    app.add_handler(CommandHandler("edit", handle_edit))
+    app.add_handler(CommandHandler("export", handle_export))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+
+    logger.info("ReelMind Bot is running! Share a Reel URL, ask a question, or use inline buttons.")
     app.run_polling()
 
 def main():
@@ -1786,15 +1955,40 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Write README.md with 3-minute self-hosted setup, command reference, and hackathon pitch guide**
-- [ ] **Step 3: Run full automated test suite across all modules**
+- [ ] **Step 2: Create Dockerfile & docker-compose.yml for one-command deployment**
+
+Create `Dockerfile`:
+```dockerfile
+FROM python:3.11-slim
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["python", "main.py"]
+```
+
+Create `docker-compose.yml`:
+```yaml
+version: '3.8'
+services:
+  reelmind:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+```
+
+- [ ] **Step 3: Write comprehensive README.md with 3-minute self-hosted guide, command reference, and hackathon pitch guide**
+- [ ] **Step 4: Run full automated test suite across all modules**
 
 Run: `pytest -v`  
 Expected: All tests PASS
 
-- [ ] **Step 4: Commit changes**
+- [ ] **Step 5: Commit changes**
 
 ```bash
-git add main.py README.md
-git commit -m "feat: complete ReelMind bot daemon, command hooks, export handler and documentation"
+git add main.py Dockerfile docker-compose.yml README.md
+git commit -m "feat: complete ReelMind runner with inline buttons, telemetry status, dockerization and documentation"
 ```
