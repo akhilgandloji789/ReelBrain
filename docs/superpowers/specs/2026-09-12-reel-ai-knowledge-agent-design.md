@@ -1,69 +1,82 @@
-# Instagram Reel AI Knowledge Agent — Design Specification
+# ReelMind: Personal AI Second Brain — Architectural Specification
 
-**Date:** 2026-09-12  
+**Date:** 2026-09-12 (Revised)  
 **Status:** Approved for Implementation  
-**Target Platform:** Python 3.10+ (Windows 11 / Cross-Platform)  
-**Cost:** $0.00 (100% Free Tier)
+**Product Thesis:** A self-hosted, Telegram-native multimodal personal second brain that turns saved short-form content into structured, actionable knowledge.  
+**Target Platform:** Python 3.10+ (Windows 11 / Linux / Docker)  
+**Cost Model:** Designed to run within free tiers for personal self-hosted use (Gemini Free Tier, Telegram Bot API, SQLite).
 
 ---
 
-## 1. Executive Summary & Problem Statement
+## 1. Executive Summary & Strategic Positioning
 
-Users frequently encounter informative, entertaining, or actionable Instagram Reels (recipes, coding tutorials, fitness workouts, book recommendations, productivity frameworks). However:
-1. **Unsearchable Instagram Saves:** Saved reels on Instagram become a cluttered, unsearchable chronological list. Finding specific information requires re-watching dozens of videos.
-2. **Messy Messaging Chats:** Forwarding reels to personal WhatsApp chats clutters conversations and photo galleries with unwieldy text blocks and loose images.
-3. **Risk of Account Bans:** Traditional Instagram scraping bots that log in to secondary accounts risk account challenges, checkpoints, or suspensions by Meta.
+### The Problem
+Saved reels, videos, and posts on social platforms quickly become an unusable graveyard. When users want to retrieve a recipe, workout, programming tutorial, or framework saved days or weeks ago, search is non-existent, scrub-bar hunting in video is tedious, and information is lost.
 
-### The Solution:
-A zero-ban-risk, 100% free AI agent that bridges Instagram to a private **Telegram Knowledge Hub with Forum Topics**:
-* **Trigger:** Share any reel from Instagram directly to your Telegram bot with two taps (`Share` → `Telegram`).
-* **Processing:** The bot downloads the video, runs multimodal video & audio analysis using **Google Gemini 2.0 Flash**, and extracts crisp highlight photos using `ffmpeg`.
-* **Output:** Formats the insights into a clean summary with bullet points, action items, tags, and a photo album, automatically routing it into categorized **Forum Topics** (e.g., `#Recipes`, `#Tech`, `#Fitness`, `#Finance`, `#General`).
+### Why Generic "Reel Summarizers" Fail
+1. **Market Saturation:** Standalone summarizers (Feedr, RecapIt, Instabrain, Reelnest) are commodities.
+2. **Native Platform Threat:** Meta Muse and native platform AI are rolling out native summarization directly inside Instagram/WhatsApp.
+3. **Lack of Grounded Trust:** Generic LLM summaries hallucinate ingredients, measurements, and code without source evidence.
+4. **Passive vs. Actionable:** Summaries are passive reading; users actually need **actionable transformations** (recipes → grocery lists, workouts → exercise logs, tutorials → clean code snippets).
+
+### The ReelMind Differentiation: Memory → Evidence → Retrieval → Action
+ReelMind moves one abstraction layer above video summarization:
+* **Telegram-Native Interface:** No new apps to download or configure. Ingestion happens via native mobile OS Share Sheet (`Share` → `Telegram`).
+* **SQLite as Canonical Source of Truth:** Telegram is solely an interface/view; the underlying database maintains full structured knowledge objects, enabling future export, web dashboards, or cross-platform clients.
+* **Evidence-Backed Extraction:** Every claim, ingredient, and instruction is indexed with exact video timeline timestamps (`Claim: Bake at 180°C. Evidence: 00:31-00:35`).
+* **Hybrid Search (FTS5 + Semantic Embeddings):** Allows intuitive conceptual querying (`"What should I do before the gym?"` matches `"10-min pre-workout mobility routine"`).
+* **Interactive Actions:** Direct command triggers in Telegram (`/ask`, `/grocery`, `/code`, `/edit`).
+* **Zero Credential Dependency:** No Instagram bot logins or account cookies; eliminates account ban risk.
 
 ---
 
-## 2. High-Level Architecture
+## 2. Decoupled System Architecture
 
 ```
-User on Instagram App
-         │
-         │ (Tap "Share" → Telegram Bot / Group)
-         ▼
 ┌────────────────────────────────────────────────────────┐
-│ Telegram Ingestion & Queue (python-telegram-bot)       │
-│  - Instantly captures Reel URL                         │
-│  - Sends status reaction / acknowledgment ("⏳ Working") │
-│  - Enqueues job to sequential worker                   │
+│                   INGESTION LAYER                      │
+│  Telegram Ingestion Adapter (Share Sheet Receiver)     │
+│  - Parses & normalizes shortcode/URL                   │
+│  - Deduplication Check (SQLite Hash & URL match)       │
 └────────────────────────┬───────────────────────────────┘
                          │
                          ▼
 ┌────────────────────────────────────────────────────────┐
-│ Video & Audio Downloader (yt-dlp)                      │
-│  - Downloads MP4 file with audio to temp directory    │
+│                 EXTRACTION ADAPTER                     │
+│  Downloader Engine (yt-dlp) + Frame Grabbing (ffmpeg)   │
+│  - Fetches MP4 video & audio stream to temp storage    │
+│  - Captures high-res JPEG highlight frames at evidence  │
 └────────────────────────┬───────────────────────────────┘
                          │
                          ▼
 ┌────────────────────────────────────────────────────────┐
-│ Multimodal AI Analyzer (Gemini 2.0 Flash Free Tier)     │
-│  - Uploads video to Google GenAI File API             │
-│  - Analyzes visual frames + spoken audio simultaneously│
-│  - Returns structured JSON: title, category, tags,     │
-│    key takeaways, steps/recipes, highlight timestamps  │
+│            MULTIMODAL UNDERSTANDING ENGINE             │
+│  Gemini 2.0 Flash + Extensible Content Schemas         │
+│  - Classifies domain (Recipe, Workout, Tech, Ideas)    │
+│  - Timeline extraction (Hook, Prep, Core, Climax)      │
+│  - Grounded claims with exact evidence timestamps      │
+│  - Typed structured_data payload                       │
 └────────────────────────┬───────────────────────────────┘
                          │
                          ▼
 ┌────────────────────────────────────────────────────────┐
-│ Frame Extractor (ffmpeg)                               │
-│  - Captures high-res JPEG photos at key timestamps    │
+│            CANONICAL KNOWLEDGE STORE (SOURCE OF TRUTH) │
+│  SQLite Database + FTS5 Full-Text + Vector Embeddings   │
+│  - Processed reels catalog                             │
+│  - Normalized structured JSON entities                 │
+│  - Text embeddings (text-embedding-004)                │
 └────────────────────────┬───────────────────────────────┘
                          │
                          ▼
 ┌────────────────────────────────────────────────────────┐
-│ Telegram Topic Publisher                               │
-│  - Maps category to group Forum Topic (thread_id)      │
-│  - Sends photo album (sendMediaGroup)                  │
-│  - Sends structured markdown summary with tags & links │
-│  - Cleans up temporary video and image files           │
+│               PRESENTATION & ACTION LAYER              │
+│  Telegram Forum Topic Publisher & Interactive Bot      │
+│  - Routes to topic thread (#Recipes, #Tech, etc.)      │
+│  - Photo Album + Evidence-annotated HTML message       │
+│  - Original Reel link at bottom                        │
+│  - Interactive commands: /ask, /grocery, /code, /edit  │
+│  - Sunday Action Review Digest (APScheduler)           │
+│  - Automatic cleanup of temp MP4 & JPEG files          │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -71,113 +84,167 @@ User on Instagram App
 
 ## 3. Detailed Component Specifications
 
-### 3.1 Telegram Ingestion & Queue Manager
-* **Library:** `python-telegram-bot` (async/await)
-* **Ingestion:**
-  * Handles direct messages to the bot or messages shared inside a private group.
-  * Regex parses any Instagram URL variant: `https://(www\.)?instagram\.com/(reel|reels|p)/[a-zA-Z0-9_-]+`.
-  * Sends an immediate feedback message: *"⏳ Processing reel... Analyzing video & audio"*.
-* **Queue Safety:**
-  * Processes one reel at a time per user to stay well within Google's 15 requests/minute rate limit.
-  * If multiple reels are shared at once, they queue sequentially without dropping.
+### 3.1 Deduplication & Ingestion Manager (`modules/ingestion.py`)
+* **URL Normalization:** Normalizes `instagram.com/reel/CODE`, `instagram.com/reels/CODE`, `instagram.com/p/CODE` to a canonical identifier.
+* **Deduplication Check:** Before downloading, queries SQLite for the canonical ID.
+  * If found: Replies in Telegram:
+    ```
+    ⚠️ Already saved on Sept 4, 2026 under 🍳 Recipes & Food!
+    📌 "High-Protein Overnight Oats"
+    🔗 View in topic thread
+    ```
+  * Prevents duplicate video downloads, redundant AI API calls, and channel clutter.
 
-### 3.2 Downloader Module (`modules/downloader.py`)
-* **Tool:** `yt-dlp` invoked via Python API.
-* **Format:** Downloads optimized MP4 (`bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best`).
-* **Storage:** Ephemeral directory `temp/videos/{reel_id}.mp4`.
-* **Error Handling:** Gracefully handles private reels or unavailable posts, reporting a clear error to the user.
+### 3.2 Downloader Adapter (`modules/downloader.py`)
+* **Tool:** `yt-dlp` invoked via isolated Python wrapper.
+* **Failure Isolation:** Instagram frequently changes delivery endpoints. If `yt-dlp` fails:
+  * Emits descriptive error with diagnostic hints (e.g. `yt-dlp update required` or `private reel`).
+  * Gracefully informs user in Telegram without crashing the background service.
+* **Storage & Cleanup:** Downloads to `temp/videos/{shortcode}.mp4`. File is guaranteed deleted immediately after Gemini upload and frame extraction.
 
-### 3.3 Multimodal AI Analysis & Smart Converter (`modules/analyzer.py`)
+### 3.3 Multimodal Analysis & Extensible Schema (`modules/analyzer.py`)
 * **Model:** `gemini-2.0-flash` via official `google-genai` SDK.
-* **Input:** Native video file uploaded via Files API (`client.files.upload`).
-* **Prompt Specification & Dynamic Schema:**
-  * System prompt instructs Gemini to adapt extraction based on detected content type:
-    * **Recipe:** Extracts ingredient list with quantities and numbered cooking steps.
-    * **Tech & Coding:** Extracts code blocks, terminal commands, and library names.
-    * **Fitness & Workout:** Extracts exercise names, target muscles, sets, and reps.
-    * **Books & Insights:** Extracts core quotes, author/title, and action frameworks.
-    * **General:** Standard bulleted takeaways.
-  * Structured JSON output includes specialized optional fields (`recipe_details`, `tech_details`, `workout_details`, `book_details`) alongside `title`, `category`, `tags`, `tldr`, `key_takeaways`, `key_timestamps`.
+* **Canonical Knowledge Schema:**
+```json
+{
+  "title": "String (engaging, descriptive title)",
+  "content_type": "recipe | workout | tech_coding | finance | book_ideas | travel | general",
+  "tldr": "String (1-2 sentence executive summary)",
+  "timeline": [
+    { "timestamp": 0.0, "label": "Hook / Problem" },
+    { "timestamp": 8.5, "label": "Ingredients / Tools" },
+    { "timestamp": 22.0, "label": "Core Technique" },
+    { "timestamp": 45.0, "label": "Final Result" }
+  ],
+  "claims_with_evidence": [
+    {
+      "claim": "Bake at 180°C for 20 minutes",
+      "evidence_timestamp": 31.5,
+      "confidence": "high"
+    }
+  ],
+  "key_takeaways": ["Takeaway 1", "Takeaway 2"],
+  "highlight_timestamps": [8.5, 45.0],
+  "structured_data": {
+    "recipe": {
+      "prep_time_minutes": 10,
+      "servings": 2,
+      "ingredients": [{"item": "Rolled oats", "quantity": "50g"}],
+      "instructions": ["Step 1...", "Step 2..."]
+    },
+    "tech": {
+      "languages_tools": ["Python", "SQLite"],
+      "code_snippets": ["pip install apscheduler"],
+      "github_links": []
+    },
+    "workout": {
+      "target_muscles": ["Quads", "Glutes"],
+      "exercises": [{"name": "Bulgarian Split Squat", "sets": 3, "reps": "8-10"}]
+    }
+  },
+  "tags": ["#Recipes", "#Nutrition", "#MealPrep"]
+}
+```
 
 ### 3.4 Keyframe Snapshot Extractor (`modules/frame_extractor.py`)
 * **Tool:** `ffmpeg` via Python `subprocess`.
-* **Execution:**
-  For each timestamp `ts` in `key_timestamps` (max 4 images):
-  `ffmpeg -y -ss {ts} -i {video_path} -frames:v 1 -q:v 2 temp/frames/{reel_id}_{index}.jpg`
-* Captures high-res photos (the finished meal, the code screen, the exercise form) to form a Telegram photo album.
+* Extracts high-resolution JPEG frames at the exact `highlight_timestamps` (max 3-4 images).
+* Automatic deletion from `temp/frames/` immediately after Telegram media group upload.
 
-### 3.5 Telegram Publisher & Topic Router (`modules/publisher.py`)
-* **Topic Routing:**
-  * Maps `category` to the corresponding Telegram group `message_thread_id`.
-* **Message Delivery:**
-  1. **Album:** Calls `bot.send_media_group` with the extracted highlight frames.
-  2. **Smart Formatted Note:** Formatted in Telegram HTML with context-adapted blocks (ingredients, code, reps) and the original Reel link at the bottom.
-  3. **Auto-Cleanup & Disk Management:** 
-     Immediately after posting to Telegram, temporary `.mp4` video files and `.jpg` frames in `temp/` are deleted automatically.
+### 3.5 Canonical Knowledge Database & Hybrid Search (`modules/storage.py` & `modules/search.py`)
+* **Database:** SQLite `data/reelminds.db`
+  * Table `reels`:
+    - `id` (INTEGER PRIMARY KEY)
+    - `source_id` (TEXT UNIQUE) — Instagram shortcode
+    - `source_url` (TEXT)
+    - `title` (TEXT)
+    - `content_type` (TEXT)
+    - `tldr` (TEXT)
+    - `structured_data_json` (TEXT)
+    - `claims_json` (TEXT)
+    - `timeline_json` (TEXT)
+    - `tags_csv` (TEXT)
+    - `thread_id` (INTEGER)
+    - `embedding_json` (BLOB/TEXT) — Gemini `text-embedding-004` vector (768 dims)
+    - `created_at` (DATETIME)
+    - `updated_at` (DATETIME)
+  * Virtual Table `reels_fts` (SQLite FTS5):
+    - Full-text search over `title`, `tldr`, `tags_csv`, `structured_data_json`.
+* **Hybrid Retrieval Engine:**
+  - Queries FTS5 for exact keyword matches.
+  - Queries vector cosine similarity for conceptual/semantic matches (`"What should I do before gym?"` -> finds `"10-minute mobility routine"`).
+  - Merges and ranks results (Reciprocal Rank Fusion / linear combination).
+  - Feeds top 3-5 results to Gemini to generate conversational answers with source citations.
 
-### 3.6 Conversational Search Engine & SQLite FTS5 (`modules/search.py` & `modules/storage.py`)
-* **FTS5 Indexing:** SQLite table `processed_reels_fts` indexes `title`, `tldr`, `key_takeaways`, `category`, and `tags`.
-* **Chat Query Handling:**
-  * When a user sends a text message that is NOT an Instagram URL (or uses `/ask <question>`), the bot queries FTS5, retrieves matching reel notes, and uses Gemini to answer conversationally with citations and links to the original reels.
+### 3.6 Telegram Presentation & Interactive Actions (`modules/publisher.py` & `main.py`)
+* **Delivery:**
+  1. **Photo Album:** `send_media_group` with the extracted highlight frames.
+  2. **Evidence-Annotated HTML Note:**
+     ```html
+     🎬 <b>10-Minute High-Protein Overnight Oats</b>
 
-### 3.7 Sunday Morning Digest Scheduler (`modules/scheduler.py`)
-* Uses `APScheduler` to run a background job every Sunday at 09:00 AM.
-* Compiles the top 5 highlights saved during the week across all categories and publishes a clean "Sunday Rollup" message.
+     📌 <b>TL;DR:</b>
+     Quick meal-prep recipe providing 35g protein without cooking.
+
+     ⏱️ <b>Timeline:</b>
+     • 00:08 — Ingredients breakdown
+     • 00:32 — Mixing & consistency
+     • 00:45 — Finished plated jar
+
+     ⚡ <b>Key Highlights & Evidence:</b>
+     • Base: 50g oats, 1 scoop vanilla whey <i>(00:08)</i>
+     • Texture trick: 1 tbsp chia seeds creates pudding-like consistency <i>(00:20)</i>
+     • Storage: Stays fresh up to 4 days refrigerated <i>(00:50)</i>
+
+     🏷️ #Recipes #Nutrition #MealPrep
+
+     🔗 <b>Original Reel:</b> https://instagram.com/reel/...
+     ```
+* **Interactive Command Hooks:**
+  * `/ask <question>` — Conversational search across your saved second brain.
+  * `/grocery` — (Reply to a recipe post) Formats an instant copy-pasteable shopping list.
+  * `/code` — (Reply to a tech post) Extracts clean syntax-highlighted code blocks.
+  * `/edit <old> -> <new>` — Enables user correction of extracted details (e.g. correcting a misheard quantity).
+* **Sunday Action Review:**
+  * Powered by `APScheduler` at 09:00 AM every Sunday.
+  * Formats an actionable review of the week:
+    ```
+    🧠 YOUR REELMIND — SUNDAY REVIEW
+    🍳 3 recipes saved (tap for grocery list)
+    🏋️ 2 workouts saved (tap for routine)
+    💻 4 tech ideas saved
+    ⭐ Most recurring topic: AI Agents & Automation
+    ```
 
 ---
 
-## 4. Directory Structure
+## 4. Operational, Legal & Cost Guardrails
 
-```
-c:/Akhil/Instagram/
-├── .env.example
-├── .env                       # TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, TELEGRAM_GROUP_ID
-├── requirements.txt           # google-genai, python-telegram-bot, yt-dlp, pydantic
-├── main.py                    # Application entrypoint & Telegram bot runner
-├── config.py                  # Pydantic/dataclass settings validation
-├── modules/
-│   ├── __init__.py
-│   ├── downloader.py          # yt-dlp video fetcher
-│   ├── analyzer.py            # Gemini 2.0 Flash multimodal engine
-│   ├── frame_extractor.py     # ffmpeg snapshot extractor
-│   ├── publisher.py           # Telegram topic router & message sender
-│   └── storage.py             # SQLite history & cache
-├── temp/                      # Ephemeral video & frame storage (auto-cleaned)
-└── data/                      # Persistent SQLite DB
-```
+1. **Credential & Ban Safety:**
+   - Fact: **No Instagram credentials required.** ReelMind does not log into, scrape, or automate an Instagram user account. It only processes publicly accessible reel links shared directly by the user.
+2. **Resource & Cost Expectations:**
+   - **Cost:** Designed to run comfortably within free tiers for personal self-hosted use.
+   - Google Gemini API free tier provides generous daily allowances, but is subject to Google terms and model lifecycle changes.
+   - Temporary storage is strictly capped: videos and extracted frames are purged upon completion, keeping disk footprint under 100MB permanently.
+3. **yt-dlp Resilience:**
+   - Isolated inside an adapter with explicit exception catching and automated upgrade instructions in case Instagram changes public media delivery headers.
 
 ---
 
-## 5. Free-Tier Quota & Performance Analysis
+## 5. Phased Implementation Roadmap
 
-| Metric | Google Gemini 2.0 Flash | Telegram Bot API |
-| :--- | :--- | :--- |
-| **Requests Limit** | 1,500 requests / day | Unlimited (30 msgs/sec) |
-| **Token Limit** | 1,000,000 TPM | N/A |
-| **Typical 1-min Reel Tokens** | ~18,000 tokens | N/A |
-| **Max Free Reels / Day** | **1,500 reels** | Unlimited |
-| **Financial Cost** | **$0.00 / month** | **$0.00 / month** |
-
----
-
-## 6. Safety & Ban Risk Assessment
-
-* **Instagram Ban Risk:** **0.0%**. No Instagram account is logged in programmatically. The user shares the link directly via standard Android/iOS share sheet to Telegram.
-* **Gemini API Safety:** Backed by automatic rate-limiting queue and exponential backoff on `429 Too Many Requests`.
-* **Data Privacy:** Data remains in the user's private Telegram group and Google AI Studio API session.
-
----
-
-## 7. Verification & Testing Plan
-
-1. **Unit Tests:**
-   * URL extraction regex tests (handling reel URLs, query parameters, short links).
-   * Schema validation tests for Gemini JSON output.
-2. **Integration Verification:**
-   * Test video download on a sample public reel with `yt-dlp`.
-   * Test multimodal Gemini analysis with video upload.
-   * Verify `ffmpeg` frame extraction at fractional timestamps.
-   * Verify Telegram message & photo album delivery to specific topic thread.
-3. **End-to-End Test:**
-   * Send a test reel link into the Telegram bot chat.
-   * Verify progress indicator, category classification, photo album, and topic delivery.
+* **Phase 1 (v1.0 Core MVP):**
+  - Task 1: Configuration, Environment & Directory Scaffold
+  - Task 2: Canonical SQLite Database with Schema, Migrations & Deduplication
+  - Task 3: Downloader Adapter (`yt-dlp`) with Auto-Cleanup & Error Isolation
+  - Task 4: Multimodal Analyzer with Typed Schemas, Timeline & Evidence Timestamps
+  - Task 5: Keyframe Snapshot Extractor (`ffmpeg`)
+  - Task 6: Telegram Publisher with Forum Topic Routing & Evidence-Annotated HTML Note
+  - Task 7: End-to-End Pipeline & Telegram Bot Runner
+* **Phase 2 (v1.1 Second Brain & Semantic Retrieval):**
+  - Task 8: FTS5 + Embedding Hybrid Search Engine & `/ask` Conversational Query
+* **Phase 3 (v1.2 Interactive Actions & Sunday Review):**
+  - Task 9: Interactive Commands (`/grocery`, `/code`, `/edit`)
+  - Task 10: Sunday Action Review Digest Scheduler (`APScheduler`)
+* **Phase 4 (v1.3 Verification & Documentation):**
+  - Task 11: Full Automated Test Suite & Self-Hosted Setup Guide
