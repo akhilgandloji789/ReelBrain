@@ -65,6 +65,55 @@ async def test_pipeline_state_machine_flow(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_pipeline_preserves_temp_when_cleanup_disabled(tmp_path: Path):
+    settings = MagicMock()
+    settings.TEMP_DIR = tmp_path
+    settings.allowed_users = []
+    settings.CLEANUP_TEMP = False
+    
+    mock_db = MagicMock()
+    mock_db.is_processed.return_value = False
+    mock_db.add_reel.return_value = 2
+    
+    mock_downloader = MagicMock()
+    video_file = tmp_path / "preserved.mp4"
+    video_file.write_bytes(b"preserved video")
+    mock_downloader.parse_input.return_value = ("C-pres", "https://instagram.com/reel/C-pres/", None)
+    mock_downloader.download_video.return_value = video_file
+    
+    mock_analyzer = MagicMock()
+    output = ReelAnalysisOutput(
+        title="Preserved Reel",
+        category="workout",
+        tldr="Summary",
+        entities=[],
+        keyframe_timestamps=[1.0]
+    )
+    mock_analyzer.analyze_video.return_value = output
+    mock_analyzer.generate_embedding.return_value = None
+    
+    mock_extractor = MagicMock()
+    fake_frame = tmp_path / "preserved_frame.jpg"
+    fake_frame.write_bytes(b"preserved frame")
+    mock_extractor.extract_frames.return_value = [fake_frame]
+    
+    pipeline = ReelPipeline(
+        settings=settings,
+        db=mock_db,
+        downloader=mock_downloader,
+        analyzer=mock_analyzer,
+        extractor=mock_extractor,
+        publisher=AsyncMock()
+    )
+    
+    success, _, _ = await pipeline.process_url("https://instagram.com/reel/C-pres/")
+    assert success is True
+    # Verify files are NOT deleted when CLEANUP_TEMP is False
+    assert video_file.exists()
+    mock_extractor.cleanup_files.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_pipeline_unauthorized_user():
     settings = MagicMock()
     settings.allowed_users = [111, 222]

@@ -2,26 +2,26 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build ReelMind — a self-hosted, Telegram-native, multimodal personal second brain that turns saved short-form video content into structured, queryable, actionable knowledge anchored on **Memory → Evidence → Retrieval → Action**, featuring user intent capture, auditable provenance, pipeline state machines, interactive feedback loops, telemetry, and hackathon demo reliability.
+**Goal:** Build ReelMind — a self-hosted, Telegram-native, multimodal personal second brain that turns saved short-form video content into structured, queryable, actionable knowledge anchored on **Memory → Evidence → Retrieval → Action**, featuring user intent capture ("why I saved this"), grounded visual timestamp proof (`⏱️ 00:31`), streamlined 1-tap interaction, hybrid search, and hackathon demo reliability.
 
 **Architecture:** A decoupled, modular Python 3.11+ application featuring:
-- **Resilient Ingestion:** Telegram link receiver parsing shortcodes and optional user intent ("why I saved this"), protected by an authorized user whitelist.
-- **State Machine Pipeline:** Job states (`RECEIVED` → `DOWNLOADING` → `DOWNLOADED` → `ANALYZING` → `ANALYZED` → `EXTRACTING_FRAMES` → `PUBLISHING` → `INDEXING` → `COMPLETED`) with idempotency and tenacity exponential retries.
-- **Multimodal AI & Real Confidence:** Gemini 2.0/2.5 Flash for vision and audio reasoning with nullable model-reported confidence scores (no fake 0.90 defaults), and configurable vector embeddings via `gemini-embedding-001` (768-dim).
-- **Canonical SQLite Store & Derived FTS5:** WAL mode database with atomic transactions, synchronizing `reels`, `entities`, `embeddings`, and `reels_fts` derived full-text index.
-- **Interactive UI & Feedback Loop:** Forum topic routing with inline keyboards (`[🛒 Grocery List]`, `[💻 Code]`, `[🔍 Ask]`, `[✏️ Edit]`, `[👍 Accurate]`, `[👎 Inaccurate]`), `/status` telemetry, and live `/canary` diagnostics.
-- **Transactional Cleanup & Recovery:** Startup recovery job purging orphaned media, guaranteeing `<100MB` permanent local disk footprint.
+- **Zero-Friction Ingestion:** Telegram link receiver parsing shortcodes and personal user intent directly from share sheets, protected by an authorized user whitelist.
+- **Auditable Visual Evidence:** Gemini 2.0 Flash multimodal analysis linking every fact or step directly to its exact video timestamp (`⏱️ 00:31`) and keyframe snapshot. No fake confidence percentages — users and judges scrub directly to the second in the video to verify truth.
+- **Conversational Memory Engine ("Ask My Memory"):** Hybrid search (SQLite FTS5 + `gemini-embedding-001` 768-dim vectors) powering `/ask` to locate and answer from past saved reels with exact timestamp citations.
+- **Streamlined 1-Tap Action UX:** Clutter-free inline keyboards providing 1-tap access to `[🔍 Ask Memory]`, context actions (`[🛒 Grocery List]` / `[💻 Copy Code]`), and accuracy feedback (`[👍] / [👎]`).
+- **Canonical SQLite Store & Derived FTS5:** Single source of truth with WAL mode, keeping full-text indexing strictly synchronized with entities and intent.
+- **Configurable Ephemeral Storage:** Automatic post-processing file cleanup keeping disk usage `<100MB`, with configurable `CLEANUP_TEMP` for testing and debugging.
 
 **Tech Stack:** Python 3.11+, `python-telegram-bot>=21.0`, `google-genai>=0.1.0`, `yt-dlp>=2024.8.6`, `pydantic>=2.7.0`, `pydantic-settings>=2.2.0`, `apscheduler>=3.10.0`, `tenacity>=8.2.0`, `numpy>=1.26.0`, `pytest`, `pytest-asyncio`, `ffmpeg`.
 
 **Spec:** [`docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md`](file:///c:/Akhil/Instagram/docs/superpowers/specs/2026-09-12-reel-ai-knowledge-agent-design.md)
 
-## Global Constraints & Performance Budget
-- **No Fake Defaults:** Confidence is nullable `float | None`; the UI displays verified timestamps rather than hardcoded 0.90 numbers.
-- **Idempotency Guarantee:** Duplicate shortcodes are rejected before initiating downloads or publishing duplicate notes.
+## Global Constraints & User Experience Focus
+- **Clean Timestamps Proof:** Evidence displays clean visual timestamps (`⏱️ 00:31`) without arbitrary percentage numbers. The video timestamp is the ultimate auditable proof.
+- **Original Link Provenance:** The original Instagram reel link is permanently attached below each published note for 1-tap navigation back to source.
+- **1-Tap Interaction:** No typing required for core workflows; inline buttons generate grocery lists and code blocks instantly.
+- **Configurable Cleanup:** Ephemeral video files are cleaned up automatically (`CLEANUP_TEMP=true`), but can be retained during debugging (`CLEANUP_TEMP=false`).
 - **Data Sovereignty:** Full database is exportable to Markdown or JSON anytime via `/export`.
-- **Performance Targets:** Processing latency ~10-25s for short reels. Max duration 90s. Max 4 keyframe snapshots.
-- **Startup Recovery:** Ephemeral files in `temp/` are swept on startup, preventing orphaned media buildup.
 
 ---
 

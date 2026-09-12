@@ -56,9 +56,7 @@ class SearchEngine:
                 mins = start_sec // 60
                 secs = start_sec % 60
                 ts_str = f"{mins:02d}:{secs:02d}"
-                conf = e.get("confidence")
-                conf_str = f"{int(conf * 100)}% conf" if conf is not None else "verified in video"
-                ent_details.append(f"{e['text']} (⏱️ {ts_str} | {conf_str})")
+                ent_details.append(f"{e['text']} (⏱️ {ts_str})")
 
             ent_summary = "; ".join(ent_details)
             intent_str = f"Why saved: {m['user_intent']}\n" if m.get("user_intent") else ""
@@ -80,7 +78,7 @@ Here is the retrieved grounded evidence from their saved reels:
 Answer the user's question directly and concisely in Telegram HTML format.
 Rules:
 1. Ground your answer ONLY in the evidence provided above.
-2. For every fact, recipe step, or code tip, cite the video timestamp and confidence score (e.g. ⏱️ 00:31 | 94% conf or verified in video).
+2. For every fact, recipe step, or code tip, cite the video timestamp (e.g. ⏱️ 00:31) so the user can scrub directly to that exact second in the video.
 3. Always include the source Reel URL at the end of your answer.
 4. If the retrieved evidence does not contain the answer, state clearly that it was not found in their saved notes.
 """

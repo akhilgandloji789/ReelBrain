@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     # Health & Canary
     CANARY_REEL_URL: str | None = None
 
-    # Paths
+    # Storage & Cleanup
+    CLEANUP_TEMP: bool = True
     DATA_DIR: Path = Path("./data")
     TEMP_DIR: Path = Path("./temp")
 

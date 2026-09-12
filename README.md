@@ -11,15 +11,15 @@ Most people save dozens of Instagram Reels and TikToks every week — recipes, w
 
 Generic AI summarizers only produce surface-level text that nobody reads. **ReelMind** is fundamentally different:
 1. **Memory:** Captures *why* you saved the video (`user_intent`), indexing personal context alongside video content.
-2. **Evidence:** Grounded multimodal extraction. Every single claim, ingredient, or step is linked to an exact timestamp in the video (`⏱️ 00:31`), backed by keyframe photo snapshots and model confidence scores.
-3. **Retrieval:** Hybrid search (SQLite FTS5 full-text + 768-dim vector embeddings) with a conversational `/ask` command that answers questions citing exact video seconds.
-4. **Action:** Turn knowledge into immediate action with Telegram **Inline Keyboards**:
-   - `[🛒 Get Grocery List]` → Formats copyable grocery checklists from recipe reels.
-   - `[💻 Copy Code]` → Extracts syntax-highlighted code blocks from tech tutorials.
-   - `[✏️ Edit]` → Allows live user corrections that atomically refresh the vector index.
-   - `[👍 Accurate] / [👎 Inaccurate]` → Interactive feedback logging.
+2. **Evidence:** Grounded multimodal extraction. Every single claim, ingredient, or step is linked to an exact timestamp in the video (`⏱️ 00:31`), backed by keyframe photo snapshots. We don't ask you to trust arbitrary percentage numbers — you can scrub directly to the video timestamp to visually verify the evidence.
+3. **Retrieval ("Ask My Memory"):** Hybrid search (SQLite FTS5 full-text + 768-dim vector embeddings) with conversational `/ask` that answers questions across all your saved reels citing exact video seconds.
+4. **Action:** Turn knowledge into immediate action with streamlined **1-Tap Inline Buttons**:
+   - `[🛒 Grocery List]` → Instant copyable grocery checklist from recipe reels.
+   - `[💻 Copy Code]` → Instant syntax-highlighted code blocks from tech tutorials.
+   - `[🔍 Ask Memory]` → Instant deep search over your personal second brain.
+   - `[👍 Accurate] / [👎 Inaccurate]` → Clean 1-tap accuracy feedback.
 5. **Data Sovereignty:** 100% self-hosted with SQLite; export your full brain anytime with `/export md` or `/export json`.
-6. **Zero-Buildup Disk Policy:** Ephemeral video and frame files are purged immediately after processing. Disk footprint stays permanently `< 100MB`.
+6. **Configurable Storage Policy:** Ephemeral video and frame files are purged immediately by default (`CLEANUP_TEMP=true`), keeping permanent disk footprint `< 100MB`. Toggle to `false` in `.env` for inspection during debugging.
 
 ---
 
@@ -116,16 +116,17 @@ python main.py --url "https://www.instagram.com/reel/C-xyz123/ Try this for Sund
 
 | Command / Action | Description |
 |---|---|
-| **Share Reel URL** | Paste an Instagram Reel URL with optional note (e.g. `https://instagram.com/reel/... Look at this workout form`). Bot parses intent, extracts evidence, and publishes formatted note. |
-| `/ask <query>` | Conversational retrieval over your saved reels. Cites timestamps and links original source. |
+| **Share Reel URL** | Paste or share an Instagram Reel URL with optional note (e.g. `https://instagram.com/reel/... Try this for meal prep`). Bot parses intent, extracts evidence, and publishes formatted note. |
+| `/ask <query>` | Conversational retrieval over your saved reels ("Ask My Memory"). Cites exact video timestamps and links original source. |
 | `/grocery <reel_id>` | Generates an interactive checklist of ingredients for recipes. |
 | `/code <reel_id>` | Extracts clean, copyable code snippets from tech tutorials. |
 | `/edit <id> <text>` | Corrects an extracted claim/ingredient and immediately triggers vector re-embedding. |
 | `/status` | Real-time health dashboard: uptime, processing latency, indexed reels, entities, and actions. |
 | `/canary` | On-demand proactive health check to verify yt-dlp, Gemini, and storage pipeline. |
 | `/export [md\|json]` | Sends downloadable Markdown or JSON archive of your entire second brain. |
-| **`[🛒 Get Grocery List]`** | Inline button on recipe notes for zero-typing checklist generation. |
-| **`[💻 Copy Code]`** | Inline button on tech notes for instant code retrieval. |
+| **`[🛒 Grocery List]`** | 1-tap button on recipe notes for instant checklist generation. |
+| **`[💻 Copy Code]`** | 1-tap button on tech notes for instant code retrieval. |
+| **`[🔍 Ask Memory]`** | 1-tap button to start searching your saved reels. |
 | **`[👍 Accurate]`** | Logs accuracy rating. |
 | **`[👎 Inaccurate]`** | Logs inaccuracy and invites user correction via `/edit`. |
 
@@ -139,12 +140,12 @@ python main.py --url "https://www.instagram.com/reel/C-xyz123/ Try this for Sund
    Share a Reel link live with a caption: `https://instagram.com/reel/... Try this for Sunday meal prep`  
    Bot immediately acknowledges: `⏳ Processing reel... Analyzing video & audio with Gemini...`
 3. **0:45–1:15 (Visual Proof):**  
-   Show the published note in Telegram: clean photo album, structured ingredients with evidence timestamps (`⏱️ 00:08`, `⏱️ 00:31`), and interactive buttons.
+   Show the published note in Telegram: clean photo album, structured ingredients with clean evidence timestamps (`⏱️ 00:08`, `⏱️ 00:31`), and 1-tap action buttons.
 4. **1:15–1:45 (Grounded `/ask`):**  
    Ask: `/ask what temperature do I bake this at?`  
-   Bot responds: `Bake at 180°C (Evidence: ⏱️ 00:31 | 94% conf)`. Scrub video to 00:31 on screen to demonstrate auditable proof!
+   Bot responds: `Bake at 180°C (Evidence: ⏱️ 00:31)`. Scrub video to 00:31 on screen to demonstrate 100% auditable proof!
 5. **1:45–2:15 (Zero-Friction Action):**  
-   Tap the inline button `[🛒 Get Grocery List]` → checklist appears instantly without typing commands.
+   Tap the inline button `[🛒 Grocery List]` → checklist appears instantly without typing commands.
 6. **2:15–2:40 (Personal Memory Query):**  
    Ask: `/ask what ideas did I save for Sunday meal prep?`  
    Bot answers matching your personal saved intent!

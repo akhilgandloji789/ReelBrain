@@ -45,3 +45,14 @@ def test_settings_missing_token_raises(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(Exception):
         Settings()
+
+def test_settings_cleanup_temp_toggle(monkeypatch, tmp_path):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:fake_token")
+    monkeypatch.setenv("TELEGRAM_GROUP_CHAT_ID", "-100123456789")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_gemini_key")
+    monkeypatch.setenv("CLEANUP_TEMP", "false")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("TEMP_DIR", str(tmp_path / "temp"))
+
+    settings = Settings()
+    assert settings.CLEANUP_TEMP is False

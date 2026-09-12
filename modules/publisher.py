@@ -38,8 +38,7 @@ class TelegramPublisher:
         entity_lines = []
         for e in analysis.entities:
             ts_str = format_timestamp(e.start_ts)
-            conf_str = f"{int(e.confidence * 100)}% conf" if e.confidence is not None else "verified in video"
-            entity_lines.append(f"• {html.escape(e.text)} <i>({ts_str} | {conf_str})</i>")
+            entity_lines.append(f"• {html.escape(e.text)} <i>(⏱️ {ts_str})</i>")
 
         body_block = "\n".join(entity_lines)
         safe_url = html.escape(original_url)
@@ -55,15 +54,15 @@ class TelegramPublisher:
 
     def build_inline_keyboard(self, reel_id: int, category: str) -> InlineKeyboardMarkup:
         rows = []
+        action_row = []
         if category == "recipe":
-            rows.append([InlineKeyboardButton("🛒 Get Grocery List", callback_data=f"grocery:{reel_id}")])
+            action_row.append(InlineKeyboardButton("🛒 Grocery List", callback_data=f"grocery:{reel_id}"))
         elif category == "tech":
-            rows.append([InlineKeyboardButton("💻 Copy Code", callback_data=f"code:{reel_id}")])
+            action_row.append(InlineKeyboardButton("💻 Copy Code", callback_data=f"code:{reel_id}"))
         
-        rows.append([
-            InlineKeyboardButton("🔍 Ask", callback_data=f"ask:{reel_id}"),
-            InlineKeyboardButton("✏️ Edit", callback_data=f"edit:{reel_id}")
-        ])
+        action_row.append(InlineKeyboardButton("🔍 Ask Memory", callback_data=f"ask:{reel_id}"))
+        rows.append(action_row)
+
         rows.append([
             InlineKeyboardButton("👍 Accurate", callback_data=f"thumb_up:{reel_id}"),
             InlineKeyboardButton("👎 Inaccurate", callback_data=f"thumb_down:{reel_id}")

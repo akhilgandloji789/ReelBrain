@@ -34,21 +34,20 @@ def test_format_note_html_truthful_confidence():
     )
     
     assert "💡 <b>Why You Saved This:</b> Sunday meal prep" in html
-    assert "• 50g Oats <i>(00:08 | verified in video)</i>" in html
-    assert "• Add milk <i>(00:15 | 94% conf)</i>" in html
+    assert "• 50g Oats <i>(⏱️ 00:08)</i>" in html
+    assert "• Add milk <i>(⏱️ 00:15)</i>" in html
     assert 'href="https://instagram.com/reel/C-test/"' in html
 
     # Test recipe buttons
     kb_recipe = publisher.build_inline_keyboard(reel_id=42, category="recipe")
     buttons = [[b.text for b in row] for row in kb_recipe.inline_keyboard]
-    assert ["🛒 Get Grocery List"] in buttons
-    assert ["🔍 Ask", "✏️ Edit"] in buttons
+    assert ["🛒 Grocery List", "🔍 Ask Memory"] in buttons
     assert ["👍 Accurate", "👎 Inaccurate"] in buttons
 
     # Test tech buttons
     kb_tech = publisher.build_inline_keyboard(reel_id=99, category="tech")
     tech_buttons = [[b.text for b in row] for row in kb_tech.inline_keyboard]
-    assert ["💻 Copy Code"] in tech_buttons
+    assert ["💻 Copy Code", "🔍 Ask Memory"] in tech_buttons
 
 
 @pytest.mark.asyncio

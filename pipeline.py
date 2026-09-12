@@ -156,10 +156,11 @@ class ReelPipeline:
                 return False, f"⚠️ Failed to process reel: {str(e)}", None
 
             finally:
-                if video_file and video_file.exists():
-                    try:
-                        video_file.unlink()
-                    except Exception:
-                        pass
-                if frame_paths:
-                    self.extractor.cleanup_files(frame_paths)
+                if getattr(self.settings, "CLEANUP_TEMP", True):
+                    if video_file and video_file.exists():
+                        try:
+                            video_file.unlink()
+                        except Exception:
+                            pass
+                    if frame_paths:
+                        self.extractor.cleanup_files(frame_paths)
