@@ -120,6 +120,15 @@ class ReelDatabase:
             )
             conn.commit()
 
+    def update_reel_metadata(self, reel_id: int, category: str, title: str, raw_transcript: str = "") -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE reels SET category = ?, title = ?, raw_transcript = ? WHERE id = ?",
+                (category, title, raw_transcript, reel_id)
+            )
+            self._sync_fts_for_reel(conn, reel_id)
+            conn.commit()
+
     def add_entities(self, reel_id: int, entities: list[dict[str, Any]]) -> None:
         with self._get_connection() as conn:
             for ent in entities:
