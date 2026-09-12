@@ -87,94 +87,42 @@ User on Instagram App
 * **Storage:** Ephemeral directory `temp/videos/{reel_id}.mp4`.
 * **Error Handling:** Gracefully handles private reels or unavailable posts, reporting a clear error to the user.
 
-### 3.3 Multimodal AI Analysis (`modules/analyzer.py`)
+### 3.3 Multimodal AI Analysis & Smart Converter (`modules/analyzer.py`)
 * **Model:** `gemini-2.0-flash` via official `google-genai` SDK.
 * **Input:** Native video file uploaded via Files API (`client.files.upload`).
-* **Prompt Specification:**
-  * System prompt instructs Gemini to act as an expert research summarizer.
-  * Enforces strict Structured JSON Schema output:
-```json
-{
-  "type": "object",
-  "properties": {
-    "title": { "type": "string" },
-    "category": {
-      "type": "string",
-      "enum": [
-        "Tech & Coding",
-        "Recipes & Food",
-        "Fitness & Health",
-        "Finance & Investing",
-        "Books & Learning",
-        "Creative & Design",
-        "General & Other"
-      ]
-    },
-    "tags": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "tldr": { "type": "string" },
-    "key_takeaways": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "detailed_steps": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "key_timestamps": {
-      "type": "array",
-      "items": { "type": "number" },
-      "description": "List of 2 to 4 key seconds where vital visual details (results, diagrams, text) appear."
-    },
-    "timestamp_labels": {
-      "type": "array",
-      "items": { "type": "string" }
-    }
-  },
-  "required": ["title", "category", "tags", "tldr", "key_takeaways", "key_timestamps"]
-}
-```
+* **Prompt Specification & Dynamic Schema:**
+  * System prompt instructs Gemini to adapt extraction based on detected content type:
+    * **Recipe:** Extracts ingredient list with quantities and numbered cooking steps.
+    * **Tech & Coding:** Extracts code blocks, terminal commands, and library names.
+    * **Fitness & Workout:** Extracts exercise names, target muscles, sets, and reps.
+    * **Books & Insights:** Extracts core quotes, author/title, and action frameworks.
+    * **General:** Standard bulleted takeaways.
+  * Structured JSON output includes specialized optional fields (`recipe_details`, `tech_details`, `workout_details`, `book_details`) alongside `title`, `category`, `tags`, `tldr`, `key_takeaways`, `key_timestamps`.
 
 ### 3.4 Keyframe Snapshot Extractor (`modules/frame_extractor.py`)
 * **Tool:** `ffmpeg` via Python `subprocess`.
 * **Execution:**
   For each timestamp `ts` in `key_timestamps` (max 4 images):
   `ffmpeg -y -ss {ts} -i {video_path} -frames:v 1 -q:v 2 temp/frames/{reel_id}_{index}.jpg`
-* Produces crisp JPEG images capturing visual tables, final recipes, code snippets, or diagrams shown in the reel.
+* Captures high-res photos (the finished meal, the code screen, the exercise form) to form a Telegram photo album.
 
 ### 3.5 Telegram Publisher & Topic Router (`modules/publisher.py`)
 * **Topic Routing:**
   * Maps `category` to the corresponding Telegram group `message_thread_id`.
-  * Pre-configured topic IDs can be defined in `.env` or auto-created if using a forum supergroup.
-  * Defaults to General if thread ID is not mapped.
 * **Message Delivery:**
   1. **Album:** Calls `bot.send_media_group` with the extracted highlight frames.
-  2. **Summary Message:** Formatted in Telegram HTML with original Reel link at the bottom:
-     ```html
-     🎬 <b>10-Minute High-Protein Overnight Oats</b>
-
-     📌 <b>TL;DR:</b>
-     Quick meal-prep recipe providing 35g protein without cooking.
-
-     ⚡ <b>Key Highlights:</b>
-     • Base: 50g oats, 1 scoop vanilla whey, 150ml almond milk.
-     • Texture trick: 1 tbsp chia seeds creates pudding-like consistency.
-     • Storage: Stays fresh up to 4 days refrigerated.
-
-     🏷️ #Recipes #Nutrition #MealPrep
-
-     🔗 <b>Original Reel:</b> https://instagram.com/reel/...
-     ```
+  2. **Smart Formatted Note:** Formatted in Telegram HTML with context-adapted blocks (ingredients, code, reps) and the original Reel link at the bottom.
   3. **Auto-Cleanup & Disk Management:** 
-     Immediately after the photo album and summary are posted to Telegram, the temporary `.mp4` video file and extracted `.jpg` frames in `temp/` are deleted automatically, keeping local disk usage at zero.
-  4. **Status Cleanup:** The initial *"⏳ Processing reel..."* message is deleted or updated to keep the chat clean.
+     Immediately after posting to Telegram, temporary `.mp4` video files and `.jpg` frames in `temp/` are deleted automatically.
 
-### 3.6 Local Cache & Duplicate Prevention
-* Lightweight SQLite database `data/reels.db`:
-  * Table `reels`: `reel_url (TEXT PRIMARY KEY)`, `category (TEXT)`, `title (TEXT)`, `processed_at (DATETIME)`.
-  * Prevents reprocessing the same reel if sent twice.
+### 3.6 Conversational Search Engine & SQLite FTS5 (`modules/search.py` & `modules/storage.py`)
+* **FTS5 Indexing:** SQLite table `processed_reels_fts` indexes `title`, `tldr`, `key_takeaways`, `category`, and `tags`.
+* **Chat Query Handling:**
+  * When a user sends a text message that is NOT an Instagram URL (or uses `/ask <question>`), the bot queries FTS5, retrieves matching reel notes, and uses Gemini to answer conversationally with citations and links to the original reels.
+
+### 3.7 Sunday Morning Digest Scheduler (`modules/scheduler.py`)
+* Uses `APScheduler` to run a background job every Sunday at 09:00 AM.
+* Compiles the top 5 highlights saved during the week across all categories and publishes a clean "Sunday Rollup" message.
 
 ---
 
