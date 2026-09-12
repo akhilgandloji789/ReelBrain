@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Any
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str
     ALLOWED_TELEGRAM_USERS: str = ""
     
-    # Vector Embeddings
+    # Gemini Models
+    GEMINI_MODEL: str = "gemini-2.5-flash"
     EMBEDDING_MODEL: str = "models/gemini-embedding-001"
     EMBEDDING_DIM: int = 768
 
@@ -30,6 +31,18 @@ class Settings(BaseSettings):
     TOPIC_TRAVEL: int | None = None
     TOPIC_FINANCE: int | None = None
     TOPIC_OTHER: int | None = None
+
+    @field_validator(
+        "TOPIC_RECIPE", "TOPIC_TECH", "TOPIC_WORKOUT",
+        "TOPIC_IDEA", "TOPIC_TRAVEL", "TOPIC_FINANCE", "TOPIC_OTHER",
+        "CANARY_REEL_URL",
+        mode="before"
+    )
+    @classmethod
+    def empty_str_to_none(cls, v: Any) -> Any:
+        if v == "" or v is None:
+            return None
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env",

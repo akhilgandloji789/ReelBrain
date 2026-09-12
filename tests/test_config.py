@@ -14,7 +14,7 @@ def test_settings_load_and_embedding_config(monkeypatch, tmp_path):
     monkeypatch.setenv("TOPIC_RECIPE", "12")
     monkeypatch.setenv("TOPIC_TECH", "15")
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.TELEGRAM_BOT_TOKEN == "12345:fake_token"
     assert settings.TELEGRAM_GROUP_CHAT_ID == -100123456789 or settings.TELEGRAM_GROUP_CHAT_ID == "-100123456789"
     assert settings.EMBEDDING_MODEL == "models/gemini-embedding-001"
@@ -32,10 +32,11 @@ def test_settings_default_embeddings(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "fake_gemini_key")
     monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
     monkeypatch.delenv("EMBEDDING_DIM", raising=False)
+    monkeypatch.delenv("ALLOWED_TELEGRAM_USERS", raising=False)
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("TEMP_DIR", str(tmp_path / "temp"))
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.EMBEDDING_MODEL == "models/gemini-embedding-001"
     assert settings.EMBEDDING_DIM == 768
     assert settings.allowed_users == []
@@ -44,7 +45,7 @@ def test_settings_missing_token_raises(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(Exception):
-        Settings()
+        Settings(_env_file=None)
 
 def test_settings_cleanup_temp_toggle(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "12345:fake_token")
@@ -54,5 +55,5 @@ def test_settings_cleanup_temp_toggle(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("TEMP_DIR", str(tmp_path / "temp"))
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.CLEANUP_TEMP is False

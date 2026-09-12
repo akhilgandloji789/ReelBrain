@@ -38,8 +38,15 @@ Return strict JSON matching the schema.
 
 
 class ReelAnalyzer:
-    def __init__(self, api_key: str, embedding_model: str = "models/gemini-embedding-001", embedding_dim: int = 768):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.5-flash",
+        embedding_model: str = "models/gemini-embedding-001",
+        embedding_dim: int = 768
+    ):
         self.client = genai.Client(api_key=api_key)
+        self.model = model
         self.embedding_model = embedding_model
         self.embedding_dim = embedding_dim
 
@@ -56,7 +63,7 @@ class ReelAnalyzer:
 
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=self.model,
                 contents=[uploaded, "Index and extract structured knowledge with exact evidence timestamps."],
                 config=types.GenerateContentConfig(
                     system_instruction=ANALYSIS_PROMPT,

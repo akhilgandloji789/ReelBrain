@@ -83,7 +83,7 @@ Rules:
 4. If the retrieved evidence does not contain the answer, state clearly that it was not found in their saved notes.
 """
         response = self.analyzer.client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=self.analyzer.model,
             contents=prompt
         )
         return response.text

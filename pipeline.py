@@ -28,6 +28,7 @@ class ReelPipeline:
         self.downloader = downloader or Downloader()
         self.analyzer = analyzer or ReelAnalyzer(
             api_key=settings.GEMINI_API_KEY,
+            model=settings.GEMINI_MODEL,
             embedding_model=settings.EMBEDDING_MODEL,
             embedding_dim=settings.EMBEDDING_DIM
         )
