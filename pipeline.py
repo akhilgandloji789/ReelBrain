@@ -25,7 +25,7 @@ class ReelPipeline:
     ):
         self.settings = settings
         self.db = db or ReelDatabase(settings.DATA_DIR / "reelminds.db")
-        self.downloader = downloader or Downloader()
+        self.downloader = downloader or Downloader(session_id=settings.INSTAGRAM_SESSION_ID)
         self.analyzer = analyzer or ReelAnalyzer(
             api_key=settings.GEMINI_API_KEY,
             model=settings.GEMINI_MODEL,
@@ -116,12 +116,14 @@ class ReelPipeline:
 
                 # State: PUBLISHING
                 self.db.update_reel_status(reel_id, "PUBLISHING")
+                is_fav = self.db.is_favorite(reel_id)
                 thread_id = await self.publisher.publish_reel(
                     reel_id=reel_id,
                     analysis=analysis,
                     frame_paths=frame_paths,
                     original_url=canonical_url,
-                    user_intent=user_intent
+                    user_intent=user_intent,
+                    is_fav=is_fav
                 )
 
                 # State: INDEXING

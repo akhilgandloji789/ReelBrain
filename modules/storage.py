@@ -130,6 +130,11 @@ class ReelDatabase:
                     url             TEXT,
                     processed_at    TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS favorites (
+                    reel_id         INTEGER PRIMARY KEY REFERENCES reels(id) ON DELETE CASCADE,
+                    favorited_at    TEXT NOT NULL
+                );
             """)
             conn.commit()
 
@@ -441,3 +446,98 @@ class ReelDatabase:
                     (cat_clean, limit, offset)
                 )
             return [dict(row) for row in cursor.fetchall()], total
+
+    def is_favorite(self, reel_id: int) -> bool:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT 1 FROM favorites WHERE reel_id = ?", (reel_id,)).fetchone()
+            return row is not None
+
+    def add_favorite(self, reel_id: int) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO favorites (reel_id, favorited_at) VALUES (?, ?)",
+                (reel_id, now)
+            )
+            conn.commit()
+            return True
+
+    def remove_favorite(self, reel_id: int) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM favorites WHERE reel_id = ?", (reel_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def toggle_favorite(self, reel_id: int) -> bool:
+        if self.is_favorite(reel_id):
+            self.remove_favorite(reel_id)
+            return False
+        else:
+            self.add_favorite(reel_id)
+            return True
+
+    def get_favorites(self, limit: int = 20, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        with self._get_connection() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM favorites f JOIN reels r ON f.reel_id = r.id WHERE r.status = 'COMPLETED'"
+            ).fetchone()[0]
+            cursor = conn.execute(
+                """
+                SELECT r.*, f.favorited_at
+                FROM favorites f
+                JOIN reels r ON f.reel_id = r.id
+                WHERE r.status = 'COMPLETED'
+                ORDER BY f.favorited_at DESC, r.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset)
+            )
+            return [dict(row) for row in cursor.fetchall()], total
+
+    def get_reels_by_period(self, period: str = "today") -> list[dict[str, Any]]:
+        period_clean = period.lower().strip()
+        now = datetime.now(timezone.utc)
+        if period_clean in ("today", "day", "24h"):
+            since = (now - timedelta(days=1)).isoformat()
+        elif period_clean in ("week", "7d"):
+            since = (now - timedelta(days=7)).isoformat()
+        elif period_clean in ("month", "30d"):
+            since = (now - timedelta(days=30)).isoformat()
+        else:
+            since = (now - timedelta(days=1)).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM reels
+                WHERE status = 'COMPLETED' AND saved_at >= ?
+                ORDER BY saved_at DESC, id DESC
+                """,
+                (since,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_category_counts_by_period(self, period: str = "today") -> dict[str, int]:
+        reels = self.get_reels_by_period(period)
+        counts: dict[str, int] = {}
+        for r in reels:
+            cat = (r.get("category") or "other").lower()
+            counts[cat] = counts.get(cat, 0) + 1
+        return counts
+
+    def get_all_week_reels_with_entities(self, days: int = 7) -> list[dict[str, Any]]:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        with self._get_connection() as conn:
+            reels = [
+                dict(r) for r in conn.execute(
+                    "SELECT * FROM reels WHERE status = 'COMPLETED' AND saved_at >= ? ORDER BY saved_at DESC, id DESC",
+                    (since,)
+                ).fetchall()
+            ]
+            for r in reels:
+                ents = conn.execute(
+                    "SELECT * FROM entities WHERE reel_id = ? ORDER BY start_ts ASC",
+                    (r["id"],)
+                ).fetchall()
+                r["entities"] = [dict(e) for e in ents]
+            return reels

@@ -101,14 +101,143 @@ def build_topic_menu_markup(db) -> tuple[str, InlineKeyboardMarkup]:
     for i in range(0, len(secondary_buttons), 2):
         rows.append(secondary_buttons[i:i+2])
 
-    rows.append([InlineKeyboardButton(f"📋 View All ({total})", callback_data="topic_view:all:0")])
+    rows.append([
+        InlineKeyboardButton(f"📋 View All ({total})", callback_data="topic_view:all:0"),
+        InlineKeyboardButton("⭐ Favorites", callback_data="fav_page:0")
+    ])
+    rows.append([
+        InlineKeyboardButton("✨ Highlights (Today/Week/Month)", callback_data="hl:today")
+    ])
 
     text = (
-        "📚 <b>ReelMind In-Group Topic Filter</b>\n\n"
-        "Browse and filter your saved Reels by category directly in Telegram.\n"
-        "Tap a topic pill below to view saved reels and notes:"
+        "🌙 <b>ReelBrain — Knowledge Navigator</b>\n"
+        "📚 <b>ReelMind In-Group Topic Filter</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Browse and filter your indexed Reels by topic, check highlights, or view favorites:\n"
     )
     return text, InlineKeyboardMarkup(rows)
+
+
+def build_highlights_view(db, period: str = "today") -> tuple[str, InlineKeyboardMarkup]:
+    period_clean = period.lower().strip()
+    if period_clean in ("week", "7d"):
+        period_key = "week"
+        period_label = "🗓️ This Week (Past 7 Days)"
+    elif period_clean in ("month", "30d"):
+        period_key = "month"
+        period_label = "🗓️ This Month (Past 30 Days)"
+    else:
+        period_key = "today"
+        period_label = "📅 Today (Past 24 Hours)"
+
+    reels = db.get_reels_by_period(period_key)
+
+    btn_today = "• Today •" if period_key == "today" else "📅 Today"
+    btn_week = "• This Week •" if period_key == "week" else "🗓️ Week"
+    btn_month = "• This Month •" if period_key == "month" else "🗓️ Month"
+
+    period_buttons = [
+        InlineKeyboardButton(btn_today, callback_data="hl:today"),
+        InlineKeyboardButton(btn_week, callback_data="hl:week"),
+        InlineKeyboardButton(btn_month, callback_data="hl:month"),
+    ]
+
+    rows = [period_buttons]
+
+    if not reels:
+        text = (
+            f"🌙 <b>ReelBrain Highlights — {period_label}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<i>No reels indexed during this period.</i>\n\n"
+            f"Share an Instagram Reel or tap another timeframe above!"
+        )
+        rows.append([InlineKeyboardButton("⬅️ Back to Topics", callback_data="topic_home")])
+        return text, InlineKeyboardMarkup(rows)
+
+    by_cat: dict[str, list[dict[str, Any]]] = {}
+    for r in reels:
+        c = (r.get("category") or "other").lower()
+        by_cat.setdefault(c, []).append(r)
+
+    text_lines = [
+        f"🌙 <b>ReelBrain Highlights — {period_label}</b>",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"⚡ <b>{len(reels)} Total Reels Indexed</b> across {len(by_cat)} topics:\n"
+    ]
+
+    quick_note_buttons = []
+    item_counter = 1
+    for cat, items in by_cat.items():
+        cat_title = CATEGORY_DISPLAY_MAP.get(cat, f"#{cat.title()}")
+        text_lines.append(f"{cat_title} (<b>{len(items)}</b>):")
+        for r in items:
+            safe_title = html.escape(r.get("title") or "Untitled")
+            safe_url = html.escape(r.get("url") or "#")
+            text_lines.append(f"  {item_counter}. <a href='{safe_url}'><b>{safe_title}</b></a>")
+            if len(quick_note_buttons) < 6:
+                quick_note_buttons.append(
+                    InlineKeyboardButton(f"📖 #{item_counter}", callback_data=f"view_note:{r['id']}")
+                )
+            item_counter += 1
+        text_lines.append("")
+
+    text_lines.append("━━━━━━━━━━━━━━━━━━━━")
+    text_lines.append("💡 <i>Tap a note button below to inspect details, or tap ⬅️ Back to Topics.</i>")
+
+    for i in range(0, len(quick_note_buttons), 3):
+        rows.append(quick_note_buttons[i:i+3])
+
+    rows.append([InlineKeyboardButton("⬅️ Back to Topics", callback_data="topic_home")])
+    return "\n".join(text_lines), InlineKeyboardMarkup(rows)
+
+
+def build_favorites_view(db, page: int = 0, page_size: int = 5) -> tuple[str, InlineKeyboardMarkup]:
+    fav_reels, total = db.get_favorites(limit=page_size, offset=max(0, page) * page_size)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1)) if total > 0 else 0
+
+    if not fav_reels:
+        text = (
+            "⭐ <b>Your Favorited Reels</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<i>You haven't favorited any reels yet!</i>\n\n"
+            "Tap the <b>⭐ Favorite</b> button on any Reel note to pin it to your favorites."
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Topics", callback_data="topic_home")]])
+        return text, markup
+
+    text_lines = [
+        f"⭐ <b>Your Favorited Reels</b> (Page {page + 1}/{total_pages} — {total} items)",
+        "━━━━━━━━━━━━━━━━━━━━\n"
+    ]
+
+    action_rows = []
+    for idx, r in enumerate(fav_reels, 1):
+        item_num = page * page_size + idx
+        safe_title = html.escape(r.get("title") or "Untitled")
+        cat = (r.get("category") or "other").lower()
+        cat_label = CATEGORY_DISPLAY_MAP.get(cat, f"#{cat}")
+        safe_url = html.escape(r.get("url") or "#")
+
+        text_lines.append(f"{item_num}. <b>{safe_title}</b> [{cat_label}]")
+        text_lines.append(f"   🔗 <a href='{safe_url}'>Original Reel</a>\n")
+
+        row = [
+            InlineKeyboardButton(f"📖 #{item_num} Note", callback_data=f"view_note:{r['id']}"),
+            InlineKeyboardButton("❌ Unstar", callback_data=f"fav_toggle:{r['id']}"),
+        ]
+        action_rows.append(row)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"fav_page:{page - 1}"))
+    if (page + 1) * page_size < total:
+        nav_row.append(InlineKeyboardButton("▶️ Next", callback_data=f"fav_page:{page + 1}"))
+    if nav_row:
+        action_rows.append(nav_row)
+
+    action_rows.append([InlineKeyboardButton("⬅️ Back to Topics", callback_data="topic_home")])
+    return "\n".join(text_lines), InlineKeyboardMarkup(action_rows)
 
 
 def build_category_reels_view(
@@ -245,6 +374,44 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text("💬 Reply with <code>/ask &lt;your question&gt;</code>", parse_mode="HTML")
     elif data.startswith("edit:"):
         await query.message.reply_text("✏️ Use <code>/edit &lt;entity_id&gt; &lt;new text&gt;</code> to correct any item.", parse_mode="HTML")
+    elif data.startswith("hl:"):
+        period = data.split(":")[1]
+        text, markup = build_highlights_view(pipeline.db, period=period)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+        except Exception as e:
+            if "Message is not modified" not in str(e):
+                logger.warning(f"Failed to edit highlights: {e}")
+    elif data.startswith("fav_toggle:"):
+        reel_id = int(data.split(":")[1])
+        now_fav = pipeline.db.toggle_favorite(reel_id)
+        toast_msg = "⭐ Added to Favorites!" if now_fav else "❌ Removed from Favorites!"
+        await query.answer(toast_msg, show_alert=False)
+
+        try:
+            if query.message and query.message.reply_markup:
+                old_markup = query.message.reply_markup
+                new_keyboard = []
+                for row in old_markup.inline_keyboard:
+                    new_row = []
+                    for btn in row:
+                        if btn.callback_data == f"fav_toggle:{reel_id}":
+                            new_label = "★ Favorited" if now_fav else "⭐ Favorite"
+                            new_row.append(InlineKeyboardButton(new_label, callback_data=btn.callback_data))
+                        else:
+                            new_row.append(btn)
+                    new_keyboard.append(new_row)
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+        except Exception as e:
+            logger.debug(f"Could not update button markup on fav_toggle: {e}")
+    elif data.startswith("fav_page:"):
+        page = int(data.split(":")[1])
+        text, markup = build_favorites_view(pipeline.db, page=page)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+        except Exception as e:
+            if "Message is not modified" not in str(e):
+                logger.warning(f"Failed to edit favorites view: {e}")
     elif data.startswith("topic_view:"):
         parts = data.split(":")
         category = parts[1]
@@ -267,6 +434,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         note_text = actions.get_reel_summary_html(reel_id)
         reel = pipeline.db.get_reel_by_id(reel_id)
         cat = (reel.get("category") or "other").lower() if reel else "other"
+        is_fav = pipeline.db.is_favorite(reel_id)
 
         buttons = []
         act_row = []
@@ -276,7 +444,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             act_row.append(InlineKeyboardButton("💻 Copy Code", callback_data=f"code:{reel_id}"))
         if act_row:
             buttons.append(act_row)
+
+        fav_label = "★ Favorited" if is_fav else "⭐ Favorite"
         buttons.append([
+            InlineKeyboardButton(fav_label, callback_data=f"fav_toggle:{reel_id}"),
             InlineKeyboardButton("👍 Accurate", callback_data=f"thumb_up:{reel_id}"),
             InlineKeyboardButton("👎 Inaccurate", callback_data=f"thumb_down:{reel_id}")
         ])
@@ -499,30 +670,113 @@ async def handle_check_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await status_msg.edit_text(f"⚠️ Radar scan encountered error: {html.escape(str(e))}", parse_mode="HTML")
 
 
+async def handle_highlights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    pipeline: ReelPipeline = context.application.bot_data["pipeline"]
+    period = context.args[0].lower() if context.args else "today"
+    text, markup = build_highlights_view(pipeline.db, period=period)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+
+
+async def handle_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    pipeline: ReelPipeline = context.application.bot_data["pipeline"]
+    text, markup = build_favorites_view(pipeline.db, page=0)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+
+
+async def handle_favorite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    pipeline: ReelPipeline = context.application.bot_data["pipeline"]
+    if not context.args:
+        await update.message.reply_text("Usage: <code>/favorite &lt;reel_id&gt;</code> or <code>/unfavorite &lt;reel_id&gt;</code>", parse_mode="HTML")
+        return
+    try:
+        reel_id = int(context.args[0])
+        cmd = update.message.text.split()[0].lstrip("/").lower() if update.message.text else ""
+        if "unfav" in cmd:
+            pipeline.db.remove_favorite(reel_id)
+            await update.message.reply_text(f"❌ Reel #{reel_id} removed from Favorites.", parse_mode="HTML")
+        else:
+            now_fav = pipeline.db.toggle_favorite(reel_id)
+            if now_fav:
+                await update.message.reply_text(f"⭐ Reel #{reel_id} added to Favorites!", parse_mode="HTML")
+            else:
+                await update.message.reply_text(f"❌ Reel #{reel_id} removed from Favorites.", parse_mode="HTML")
+    except ValueError:
+        await update.message.reply_text("⚠️ Please provide a valid numeric Reel ID.", parse_mode="HTML")
+
+
+async def handle_digest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    scheduler: SchedulerService = context.application.bot_data.get("scheduler")
+    if not scheduler:
+        await update.message.reply_text("⚠️ Scheduler service not running.", parse_mode="HTML")
+        return
+
+    digest_text = scheduler.build_weekly_digest()
+    if not digest_text:
+        await update.message.reply_text(
+            "🌙 <b>ReelBrain Weekly Review</b>\n\n"
+            "<i>No reels were saved in the past 7 days yet!</i>\n"
+            "Save reels by sharing links here or sending to your connected account.",
+            parse_mode="HTML"
+        )
+        return
+
+    await update.message.reply_text(digest_text, parse_mode="HTML", disable_web_page_preview=True)
+
+
+async def handle_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if context.args:
+        action = context.args[0].lower()
+        if action in ("add", "track") and len(context.args) > 1:
+            context.args = context.args[1:]
+            await handle_track(update, context)
+            return
+        elif action in ("remove", "delete", "untrack") and len(context.args) > 1:
+            context.args = context.args[1:]
+            await handle_untrack(update, context)
+            return
+    await handle_tracked(update, context)
+
+
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     msg = (
-        "🧠 <b>ReelMind / ReelBrain — AI Second Brain Commands</b>\n\n"
-        "Here are all the available features you can use:\n\n"
-        "📂 <b>Search & Browse:</b>\n"
+        "🌙 <b>ReelBrain AI — Dark Mode Command Navigator</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "✨ <b>Highlights & Reviews:</b>\n"
+        "• <code>/highlights [today|week|month]</code> — Time-filtered digest of saved topics & titles\n"
+        "• <code>/favorites</code> — Browse your starred favorite reels\n"
+        "• <code>/digest</code> — On-demand Sunday master weekly review\n\n"
+        "📂 <b>Search & Topics:</b>\n"
         "• <code>/filter</code> or <code>/topics</code> — Interactive topic buttons (#recipe, #tech, #fitness, #ideas)\n"
-        "• <code>/ask &lt;question&gt;</code> — Semantic search with exact video timestamps (e.g. <i>/ask how to win a hackathon?</i>)\n"
+        "• <code>/ask &lt;question&gt;</code> — Semantic search with exact video timestamps\n"
         "• <code>/reels &lt;topic&gt;</code> — Quick filter by category (e.g. <i>/reels tech</i>)\n\n"
-        "📡 <b>Creator Radar (Auto-Monitoring):</b>\n"
-        "• <code>/track @handle</code> — Auto-monitor an Instagram creator for new reels\n"
-        "• <code>/untrack @handle</code> — Stop monitoring a creator\n"
-        "• <code>/tracked</code> — List all active radar channels & check times\n"
-        "• <code>/check_now</code> — Force an immediate scan for new reels right now\n\n"
+        "📡 <b>Wishlist Creator Radar (Auto-Monitoring):</b>\n"
+        "• <code>/wishlist</code> — View monitored creators & radar status\n"
+        "• <code>/track @handle</code> (or <code>/wishlist add @handle</code>) — Auto-monitor an Instagram creator\n"
+        "• <code>/untrack @handle</code> (or <code>/wishlist remove @handle</code>) — Stop monitoring a creator\n"
+        "• <code>/check_now</code> — Trigger immediate scan for new reels right now\n\n"
         "⚡ <b>Action Tools:</b>\n"
         "• <code>/grocery &lt;reel_id&gt;</code> — Generate clean shopping checklist\n"
         "• <code>/code &lt;reel_id&gt;</code> — Extract syntax-highlighted code snippets\n"
+        "• <code>/favorite &lt;reel_id&gt;</code> — Pin a reel to favorites\n"
         "• <code>/edit &lt;entity_id&gt; &lt;new text&gt;</code> — Correct an entity & re-embed\n"
         "• <code>/export md</code> or <code>/export json</code> — Download entire database\n\n"
         "📊 <b>System & Health:</b>\n"
         "• <code>/status</code> — Telemetry, total reels & disk footprint\n"
-        "• <code>/canary</code> — Run end-to-end diagnostic test\n\n"
-        "💡 <i>Tip: You can also DM any Reel to your receiver Instagram account or paste the link here!</i>"
+        "• <code>/canary</code> — Run end-to-end diagnostic test\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>Tip: Tap ⭐ Favorite on any Reel note to save it instantly!</i>"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -560,6 +814,10 @@ def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: Action
         commands = [
             BotCommand("filter", "Browse & filter saved reels by topic"),
             BotCommand("topics", "Interactive topic menu"),
+            BotCommand("highlights", "View highlights of today, week, or month"),
+            BotCommand("favorites", "Browse your favorited reels"),
+            BotCommand("digest", "Sunday weekly master digest"),
+            BotCommand("wishlist", "Manage wishlist creator accounts"),
             BotCommand("ask", "Search your second brain with AI timestamps"),
             BotCommand("track", "Auto-monitor an Instagram creator (@handle)"),
             BotCommand("untrack", "Stop monitoring an Instagram creator"),
@@ -602,6 +860,17 @@ def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: Action
     app.add_handler(CommandHandler("help", handle_help))
     app.add_handler(CommandHandler("start", handle_help))
     app.add_handler(CommandHandler("commands", handle_help))
+    app.add_handler(CommandHandler("highlights", handle_highlights))
+    app.add_handler(CommandHandler("recap", handle_highlights))
+    app.add_handler(CommandHandler("favorites", handle_favorites))
+    app.add_handler(CommandHandler("favs", handle_favorites))
+    app.add_handler(CommandHandler("favorite", handle_favorite_cmd))
+    app.add_handler(CommandHandler("unfavorite", handle_favorite_cmd))
+    app.add_handler(CommandHandler("fav", handle_favorite_cmd))
+    app.add_handler(CommandHandler("digest", handle_digest))
+    app.add_handler(CommandHandler("sunday_review", handle_digest))
+    app.add_handler(CommandHandler("wishlist", handle_wishlist))
+    app.add_handler(CommandHandler("creators", handle_wishlist))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("canary", handle_canary))
     app.add_handler(CommandHandler("ask", handle_ask))

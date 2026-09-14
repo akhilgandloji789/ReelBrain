@@ -1,3 +1,4 @@
+import html
 import logging
 from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -27,42 +28,92 @@ class SchedulerService:
         self.scheduler = AsyncIOScheduler()
 
     def build_weekly_digest(self) -> str | None:
-        recent = self.db.get_recent_reels(days=7)
+        recent = []
+        if hasattr(self.db, "get_all_week_reels_with_entities"):
+            try:
+                res = self.db.get_all_week_reels_with_entities(days=7)
+                if isinstance(res, list) and res:
+                    recent = res
+            except Exception:
+                pass
+
+        if not recent and hasattr(self.db, "get_recent_reels"):
+            try:
+                res = self.db.get_recent_reels(days=7)
+                if isinstance(res, list) and res:
+                    recent = res
+            except Exception:
+                pass
+
         if not recent:
             return None
 
-        recipes = [r for r in recent if r.get("category") == "recipe"]
-        workouts = [r for r in recent if r.get("category") == "workout"]
-        tech = [r for r in recent if r.get("category") == "tech"]
-        others = [r for r in recent if r.get("category") not in ("recipe", "workout", "tech")]
+        category_map = {
+            "recipe": "🍳 Recipes",
+            "tech": "💻 Tech & AI",
+            "workout": "💪 Fitness",
+            "idea": "💡 Ideas & Wisdom",
+            "travel": "✈️ Travel",
+            "finance": "💰 Finance",
+            "other": "📌 Other",
+        }
 
-        lines = ["🧠 <b>YOUR REELMIND — SUNDAY REVIEW</b>\n"]
-        if recipes:
-            lines.append(f"🍳 <b>{len(recipes)} recipe{'s' if len(recipes) > 1 else ''} saved:</b>")
-            for r in recipes[:3]:
-                title = r.get("title") or "Recipe"
-                url = r.get("url") or "#"
-                lines.append(f"• <a href='{url}'>{title}</a>")
-            lines.append("")
-        if workouts:
-            lines.append(f"🏋️ <b>{len(workouts)} workout{'s' if len(workouts) > 1 else ''} saved:</b>")
-            for w in workouts[:3]:
-                title = w.get("title") or "Workout"
-                url = w.get("url") or "#"
-                lines.append(f"• <a href='{url}'>{title}</a>")
-            lines.append("")
-        if tech:
-            lines.append(f"💻 <b>{len(tech)} tech idea{'s' if len(tech) > 1 else ''} saved:</b>")
-            for t in tech[:3]:
-                title = t.get("title") or "Tech Item"
-                url = t.get("url") or "#"
-                lines.append(f"• <a href='{url}'>{title}</a>")
-            lines.append("")
-        if others:
-            lines.append(f"💡 <b>{len(others)} other discovery item{'s' if len(others) > 1 else ''} saved.</b>\n")
+        by_cat: dict[str, list[dict[str, Any]]] = {}
+        for r in recent:
+            c = (r.get("category") or "other").lower()
+            by_cat.setdefault(c, []).append(r)
 
-        lines.append("<i>Ask me anything about these with /ask!</i>")
-        return "\n".join(lines)
+        total_reels = len(recent)
+        lines = [
+            "🌙 <b>REELBRAIN — SUNDAY MASTER DIGEST</b>",
+            "🧠 <b>YOUR REELMIND — SUNDAY REVIEW</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"📅 <b>Weekly Executive Review: {total_reels} Reels Indexed</b>\n"
+            "Here is all the knowledge captured this week across all topics:\n"
+        ]
+
+        for cat, reels in by_cat.items():
+            cat_label = category_map.get(cat, f"📌 #{cat.title()}")
+            lines.append(f"{cat_label} (<b>{len(reels)}</b>):")
+            for r in reels:
+                title = html.escape(r.get("title") or "Untitled Reel")
+                url = html.escape(r.get("url") or "#")
+                lines.append(f"• <a href='{url}'><b>{title}</b></a>")
+                
+                tldr = r.get("raw_transcript") or ""
+                if tldr:
+                    tldr_clean = html.escape(tldr.replace("\n", " ").strip())
+                    if len(tldr_clean) > 90:
+                        tldr_clean = tldr_clean[:87] + "..."
+                    lines.append(f"  ↳ <i>{tldr_clean}</i>")
+                elif r.get("entities"):
+                    top_ents = [html.escape(e["text"]) for e in r["entities"][:2]]
+                    lines.append(f"  ↳ <i>{'; '.join(top_ents)}</i>")
+            lines.append("")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append("💡 <i>Ask your second brain anything with /ask, or explore topics with /filter.</i>")
+        
+        digest_text = "\n".join(lines)
+        if len(digest_text) > 4000:
+            compact_lines = [
+                "🌙 <b>REELBRAIN — SUNDAY MASTER DIGEST</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+                f"📅 <b>Weekly Executive Review: {total_reels} Reels Indexed</b>\n"
+            ]
+            for cat, reels in by_cat.items():
+                cat_label = category_map.get(cat, f"📌 #{cat.title()}")
+                compact_lines.append(f"{cat_label} (<b>{len(reels)}</b>):")
+                for r in reels:
+                    title = html.escape(r.get("title") or "Untitled Reel")
+                    url = html.escape(r.get("url") or "#")
+                    compact_lines.append(f"• <a href='{url}'>{title}</a>")
+                compact_lines.append("")
+            compact_lines.append("━━━━━━━━━━━━━━━━━━━━")
+            compact_lines.append("💡 <i>Use /ask or /filter to explore all detailed notes.</i>")
+            digest_text = "\n".join(compact_lines)
+
+        return digest_text
 
     async def send_weekly_digest(self) -> None:
         digest = self.build_weekly_digest()

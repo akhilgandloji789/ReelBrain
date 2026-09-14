@@ -18,11 +18,12 @@ class CircuitBreakerOpen(Exception):
 
 
 class Downloader:
-    def __init__(self, failure_threshold: int = 3, reset_timeout: int = 120):
+    def __init__(self, failure_threshold: int = 3, reset_timeout: int = 120, session_id: str | None = None):
         self.failure_threshold = failure_threshold
         self.reset_timeout = reset_timeout
         self.consecutive_failures = 0
         self.circuit_open_until = 0.0
+        self.session_id = session_id
 
     def parse_input(self, raw_text: str) -> tuple[str | None, str | None, str | None]:
         match = REEL_REGEX.search(raw_text)
@@ -112,6 +113,26 @@ class Downloader:
         if not clean_handle:
             return []
 
+        # 1. Primary: If instagrapi session is available, query mobile API for 100% reliability
+        if self.session_id:
+            try:
+                from instagrapi import Client as InstaClient
+                cl = InstaClient()
+                cl.login_by_sessionid(self.session_id)
+                user_id = cl.user_id_from_username(clean_handle)
+                if user_id:
+                    clips = cl.user_clips(user_id, amount=limit)
+                    reels: list[str] = []
+                    for clip in clips:
+                        code = getattr(clip, "code", None)
+                        if code:
+                            reels.append(f"https://www.instagram.com/reel/{code}/")
+                    if reels:
+                        return reels
+            except Exception:
+                pass
+
+        # 2. Fallback: yt-dlp flat playlist extraction
         ydl_opts = {
             "extract_flat": True,
             "quiet": True,

@@ -133,3 +133,77 @@ def test_cleanup_orphaned_jobs(tmp_path: Path):
     stuck_reel = db.get_reel_by_id(r1)
     assert stuck_reel["status"] == "FAILED"
     assert "Timeout" in (stuck_reel["error_message"] or "")
+
+
+def test_favorites_storage_and_toggle(tmp_path: Path):
+    db = ReelDatabase(tmp_path / "test_reelminds.db")
+    r1 = db.add_reel("https://www.instagram.com/reel/C-fav1/", "C-fav1", "recipe", "Fav Pasta")
+    db.update_reel_status(r1, "COMPLETED")
+
+    # Not favorited initially
+    assert db.is_favorite(r1) is False
+    favs, count = db.get_favorites()
+    assert count == 0
+
+    # Toggle to favorite
+    now_fav = db.toggle_favorite(r1)
+    assert now_fav is True
+    assert db.is_favorite(r1) is True
+
+    favs, count = db.get_favorites()
+    assert count == 1
+    assert favs[0]["id"] == r1
+    assert favs[0]["title"] == "Fav Pasta"
+
+    # Toggle again to remove favorite
+    now_fav = db.toggle_favorite(r1)
+    assert now_fav is False
+    assert db.is_favorite(r1) is False
+
+    favs, count = db.get_favorites()
+    assert count == 0
+
+
+def test_reels_by_period_and_highlights(tmp_path: Path):
+    from datetime import datetime, timedelta, timezone
+    db = ReelDatabase(tmp_path / "test_reelminds.db")
+
+    r_today = db.add_reel("https://www.instagram.com/reel/C-today/", "C-today", "tech", "AI Agent")
+    db.update_reel_status(r_today, "COMPLETED")
+
+    r_week = db.add_reel("https://www.instagram.com/reel/C-week/", "C-week", "recipe", "Weekly Cake")
+    db.update_reel_status(r_week, "COMPLETED")
+    with db._get_connection() as conn:
+        three_days_ago = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        conn.execute("UPDATE reels SET saved_at = ? WHERE id = ?", (three_days_ago, r_week))
+        conn.commit()
+
+    r_old = db.add_reel("https://www.instagram.com/reel/C-old/", "C-old", "workout", "Old Leg Day")
+    db.update_reel_status(r_old, "COMPLETED")
+    with db._get_connection() as conn:
+        two_months_ago = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        conn.execute("UPDATE reels SET saved_at = ? WHERE id = ?", (two_months_ago, r_old))
+        conn.commit()
+
+    # Today should only have r_today
+    today_reels = db.get_reels_by_period("today")
+    assert len(today_reels) == 1
+    assert today_reels[0]["id"] == r_today
+
+    # Week should have r_today and r_week
+    week_reels = db.get_reels_by_period("week")
+    assert len(week_reels) == 2
+    assert {r["id"] for r in week_reels} == {r_today, r_week}
+
+    # Month should have r_today and r_week (not r_old)
+    month_reels = db.get_reels_by_period("month")
+    assert len(month_reels) == 2
+
+    # Test category counts by period
+    counts_today = db.get_category_counts_by_period("today")
+    assert counts_today.get("tech") == 1
+    assert counts_today.get("recipe", 0) == 0
+
+    counts_week = db.get_category_counts_by_period("week")
+    assert counts_week.get("tech") == 1
+    assert counts_week.get("recipe") == 1

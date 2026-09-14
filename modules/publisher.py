@@ -33,12 +33,12 @@ class TelegramPublisher:
 
         intent_block = ""
         if user_intent:
-            if user_intent.startswith("Radar:"):
-                intent_block = f"📡 <b>{html.escape(user_intent)}</b>\n\n"
+            if user_intent.startswith("Radar:") or user_intent.startswith("Wishlist:"):
+                intent_block = f"📡 <b>{html.escape(user_intent)}</b>\n"
             elif user_intent.startswith("Instagram DM"):
-                intent_block = f"📥 <b>{html.escape(user_intent)}</b>\n\n"
+                intent_block = f"📥 <b>{html.escape(user_intent)}</b>\n"
             else:
-                intent_block = f"💡 <b>Why You Saved This:</b> {html.escape(user_intent)}\n\n"
+                intent_block = f"💡 <b>Why You Saved This:</b> {html.escape(user_intent)}\n"
 
         entity_lines = []
         for e in analysis.entities:
@@ -54,15 +54,17 @@ class TelegramPublisher:
         safe_url = html.escape(original_url)
 
         return (
-            f"🎬 <b>{safe_title}</b>\n\n"
+            f"🎬 <b>{safe_title}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{intent_block}"
             f"📌 <b>TL;DR:</b>\n{safe_tldr}\n\n"
             f"⚡ <b>Key Evidence & Steps:</b>\n{body_block}\n\n"
-            f"🏷️ <i>#{analysis.category}</i>\n\n"
+            f"🏷️ <code>#{analysis.category}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f'🔗 <b>Original Reel:</b> <a href="{safe_url}">{safe_url}</a>'
         )
 
-    def build_inline_keyboard(self, reel_id: int, category: str) -> InlineKeyboardMarkup:
+    def build_inline_keyboard(self, reel_id: int, category: str, is_fav: bool = False) -> InlineKeyboardMarkup:
         rows = []
         action_row = []
         if category == "recipe":
@@ -73,6 +75,10 @@ class TelegramPublisher:
         action_row.append(InlineKeyboardButton("🔍 Ask Memory", callback_data=f"ask:{reel_id}"))
         rows.append(action_row)
 
+        fav_label = "★ Favorited" if is_fav else "⭐ Favorite"
+        rows.append([
+            InlineKeyboardButton(fav_label, callback_data=f"fav_toggle:{reel_id}")
+        ])
         rows.append([
             InlineKeyboardButton("👍 Accurate", callback_data=f"thumb_up:{reel_id}"),
             InlineKeyboardButton("👎 Inaccurate", callback_data=f"thumb_down:{reel_id}")
@@ -85,7 +91,8 @@ class TelegramPublisher:
         analysis: ReelAnalysisOutput,
         frame_paths: list[Path | str],
         original_url: str,
-        user_intent: str | None = None
+        user_intent: str | None = None,
+        is_fav: bool = False
     ) -> int | None:
         thread_id = self.get_thread_id(analysis.category)
         
@@ -109,7 +116,7 @@ class TelegramPublisher:
                     fp.close()
 
         text_content = self.format_note_html(analysis, original_url, user_intent)
-        reply_markup = self.build_inline_keyboard(reel_id, analysis.category)
+        reply_markup = self.build_inline_keyboard(reel_id, analysis.category, is_fav=is_fav)
         
         await self.bot.send_message(
             chat_id=self.group_chat_id,
