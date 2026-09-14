@@ -3,7 +3,7 @@ import asyncio
 import html
 import logging
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -499,6 +499,34 @@ async def handle_check_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await status_msg.edit_text(f"⚠️ Radar scan encountered error: {html.escape(str(e))}", parse_mode="HTML")
 
 
+async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    msg = (
+        "🧠 <b>ReelMind / ReelBrain — AI Second Brain Commands</b>\n\n"
+        "Here are all the available features you can use:\n\n"
+        "📂 <b>Search & Browse:</b>\n"
+        "• <code>/filter</code> or <code>/topics</code> — Interactive topic buttons (#recipe, #tech, #fitness, #ideas)\n"
+        "• <code>/ask &lt;question&gt;</code> — Semantic search with exact video timestamps (e.g. <i>/ask how to win a hackathon?</i>)\n"
+        "• <code>/reels &lt;topic&gt;</code> — Quick filter by category (e.g. <i>/reels tech</i>)\n\n"
+        "📡 <b>Creator Radar (Auto-Monitoring):</b>\n"
+        "• <code>/track @handle</code> — Auto-monitor an Instagram creator for new reels\n"
+        "• <code>/untrack @handle</code> — Stop monitoring a creator\n"
+        "• <code>/tracked</code> — List all active radar channels & check times\n"
+        "• <code>/check_now</code> — Force an immediate scan for new reels right now\n\n"
+        "⚡ <b>Action Tools:</b>\n"
+        "• <code>/grocery &lt;reel_id&gt;</code> — Generate clean shopping checklist\n"
+        "• <code>/code &lt;reel_id&gt;</code> — Extract syntax-highlighted code snippets\n"
+        "• <code>/edit &lt;entity_id&gt; &lt;new text&gt;</code> — Correct an entity & re-embed\n"
+        "• <code>/export md</code> or <code>/export json</code> — Download entire database\n\n"
+        "📊 <b>System & Health:</b>\n"
+        "• <code>/status</code> — Telemetry, total reels & disk footprint\n"
+        "• <code>/canary</code> — Run end-to-end diagnostic test\n\n"
+        "💡 <i>Tip: You can also DM any Reel to your receiver Instagram account or paste the link here!</i>"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
 def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: ActionHandler, settings: Settings) -> None:
     pipeline.startup_recovery()
 
@@ -528,6 +556,30 @@ def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: Action
         application.bot_data["instagram_receiver"] = instagram_receiver
         logger.info("Scheduler started successfully inside event loop.")
 
+        # Register bot commands with Telegram so typing '/' shows autocomplete menu
+        commands = [
+            BotCommand("filter", "Browse & filter saved reels by topic"),
+            BotCommand("topics", "Interactive topic menu"),
+            BotCommand("ask", "Search your second brain with AI timestamps"),
+            BotCommand("track", "Auto-monitor an Instagram creator (@handle)"),
+            BotCommand("untrack", "Stop monitoring an Instagram creator"),
+            BotCommand("tracked", "View all active creator radar channels"),
+            BotCommand("check_now", "Trigger instant radar scan for new reels"),
+            BotCommand("status", "View system telemetry & disk footprint"),
+            BotCommand("canary", "Run end-to-end health diagnostic"),
+            BotCommand("grocery", "Extract grocery checklist from a recipe"),
+            BotCommand("code", "Extract clean code blocks from a tech reel"),
+            BotCommand("edit", "Correct an entity text & refresh embedding"),
+            BotCommand("export", "Export knowledge base as Markdown or JSON"),
+            BotCommand("help", "Show all features and usage guide"),
+            BotCommand("start", "Welcome message & getting started"),
+        ]
+        try:
+            await application.bot.set_my_commands(commands)
+            logger.info("Registered bot commands with Telegram for '/' popup menu.")
+        except Exception as e:
+            logger.warning(f"Could not register bot commands: {e}")
+
     async def post_shutdown(application) -> None:
         if scheduler_holder["service"]:
             scheduler_holder["service"].shutdown()
@@ -547,6 +599,9 @@ def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: Action
     app.bot_data["settings"] = settings
     app.bot_data["instagram_receiver"] = instagram_receiver
 
+    app.add_handler(CommandHandler("help", handle_help))
+    app.add_handler(CommandHandler("start", handle_help))
+    app.add_handler(CommandHandler("commands", handle_help))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("canary", handle_canary))
     app.add_handler(CommandHandler("ask", handle_ask))

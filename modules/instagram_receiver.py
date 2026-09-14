@@ -164,15 +164,60 @@ class InstagramReceiver:
         if not self.session_id:
             return []
 
+        results: list[tuple[bool, str, int | None]] = []
+
+        # 1. Primary: instagrapi client if available
+        try:
+            from instagrapi import Client as InstaClient
+            cl = InstaClient()
+            cl.login_by_sessionid(self.session_id)
+            threads = cl.direct_threads(amount=10)
+            for thread in threads:
+                for m in getattr(thread, "messages", []):
+                    mid = str(getattr(m, "id", ""))
+                    if not mid or self.db.is_dm_processed(mid):
+                        continue
+
+                    sender_id = str(getattr(m, "user_id", ""))
+                    text_val = getattr(m, "text", "") or ""
+                    reel_url = None
+
+                    # Check xma_share (standard Reel share in DMs)
+                    xma_share = getattr(m, "xma_share", None)
+                    if xma_share and getattr(xma_share, "video_url", None):
+                        reel_url = xma_share.video_url
+                    elif getattr(m, "clip", None) and getattr(m.clip, "code", None):
+                        reel_url = f"https://www.instagram.com/reel/{m.clip.code}/"
+                    elif getattr(m, "media_share", None) and getattr(m.media_share, "code", None):
+                        reel_url = f"https://www.instagram.com/reel/{m.media_share.code}/"
+                    elif text_val:
+                        match = REEL_REGEX.search(text_val)
+                        if match:
+                            reel_url = f"https://www.instagram.com/reel/{match.group(1)}/"
+
+                    if reel_url:
+                        res = await self.process_message(
+                            mid=mid,
+                            text=text_val,
+                            sender_id=sender_id,
+                            url=reel_url
+                        )
+                        results.append(res)
+            return results
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"instagrapi polling attempt: {e}; falling back to direct HTTP")
+
+        # 2. Fallback: Direct HTTP v2 inbox
         url = "https://i.instagram.com/api/v1/direct_v2/inbox/"
+        ds_user_id = self.session_id.split("%3A")[0] if "%3A" in self.session_id else self.session_id.split(":")[0]
         headers = {
             "User-Agent": "Instagram 219.0.0.12.117 Android (30/11; 480dpi; 1080x2240; Xiaomi; Redmi Note 7; lavender; qcom; en_US)",
-            "Cookie": f"sessionid={self.session_id}",
+            "Cookie": f"sessionid={self.session_id}; ds_user_id={ds_user_id};",
             "Accept-Language": "en-US",
             "Accept-Encoding": "gzip, deflate",
         }
-
-        results: list[tuple[bool, str, int | None]] = []
 
         try:
             client = self._http_client or httpx.AsyncClient(timeout=15.0)
