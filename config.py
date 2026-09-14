@@ -32,10 +32,20 @@ class Settings(BaseSettings):
     TOPIC_FINANCE: int | None = None
     TOPIC_OTHER: int | None = None
 
+    # Channel Monitor Radar
+    CHANNEL_CHECK_INTERVAL_MINS: int = 30
+
+    # Instagram Direct DM Ingestion
+    INSTAGRAM_SESSION_ID: str | None = None
+    INSTAGRAM_USERNAME: str | None = None
+    INSTAGRAM_PASSWORD: str | None = None
+    INSTAGRAM_WEBHOOK_VERIFY_TOKEN: str | None = None
+
     @field_validator(
         "TOPIC_RECIPE", "TOPIC_TECH", "TOPIC_WORKOUT",
         "TOPIC_IDEA", "TOPIC_TRAVEL", "TOPIC_FINANCE", "TOPIC_OTHER",
-        "CANARY_REEL_URL",
+        "CANARY_REEL_URL", "INSTAGRAM_SESSION_ID", "INSTAGRAM_USERNAME",
+        "INSTAGRAM_PASSWORD", "INSTAGRAM_WEBHOOK_VERIFY_TOKEN",
         mode="before"
     )
     @classmethod

@@ -165,3 +165,9 @@ class ReelPipeline:
                             pass
                     if frame_paths:
                         self.extractor.cleanup_files(frame_paths)
+                    if shortcode and video_dir.exists():
+                        for aux in video_dir.glob(f"*{shortcode}*"):
+                            try:
+                                aux.unlink()
+                            except Exception:
+                                pass

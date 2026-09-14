@@ -13,13 +13,17 @@ class SchedulerService:
         bot: Any,
         chat_id: str | int,
         pipeline: Any = None,
-        canary_url: str | None = None
+        canary_url: str | None = None,
+        channel_check_interval_mins: int = 30,
+        instagram_receiver: Any = None
     ):
         self.db = db
         self.bot = bot
         self.chat_id = chat_id
         self.pipeline = pipeline
         self.canary_url = canary_url
+        self.channel_check_interval_mins = channel_check_interval_mins
+        self.instagram_receiver = instagram_receiver
         self.scheduler = AsyncIOScheduler()
 
     def build_weekly_digest(self) -> str | None:
@@ -94,10 +98,62 @@ class SchedulerService:
                 pass
             return False, str(e)
 
+    async def scan_tracked_channels(self) -> dict[str, int]:
+        channels = self.db.get_tracked_channels(active_only=True)
+        total_new = 0
+        if not self.pipeline:
+            return {"scanned_channels": len(channels), "new_reels_processed": 0}
+
+        for ch in channels:
+            handle = ch["handle"]
+            try:
+                downloader = getattr(self.pipeline, "downloader", None)
+                if not downloader:
+                    continue
+                reel_urls = downloader.get_channel_reels(handle, limit=3)
+            except Exception as e:
+                logger.warning(f"Failed to fetch reels for creator @{handle}: {e}")
+                continue
+
+            latest_shortcode = None
+            for reel_url in reel_urls:
+                shortcode, canonical_url, _ = self.pipeline.downloader.parse_input(reel_url)
+                if not shortcode:
+                    continue
+                if not latest_shortcode:
+                    latest_shortcode = shortcode
+                if self.db.is_processed(shortcode):
+                    continue
+
+                logger.info(f"Channel Radar detected new Reel for @{handle}: {canonical_url}")
+                intent = f"Radar: Monitored creator @{handle}"
+                try:
+                    success, msg, _ = await self.pipeline.process_url(f"{canonical_url} {intent}")
+                    if success:
+                        total_new += 1
+                except Exception as e:
+                    logger.error(f"Error processing radar reel {canonical_url}: {e}")
+
+            self.db.update_channel_last_checked(handle, last_shortcode=latest_shortcode)
+
+        return {"scanned_channels": len(channels), "new_reels_processed": total_new}
+
+    async def poll_instagram_dms(self) -> list[tuple[bool, str, int | None]]:
+        if self.instagram_receiver:
+            try:
+                return await self.instagram_receiver.poll_direct_inbox()
+            except Exception as e:
+                logger.warning(f"Instagram DM polling encountered error: {e}")
+        return []
+
     def start(self) -> None:
         self.scheduler.add_job(self.send_weekly_digest, "cron", day_of_week="sun", hour=9, minute=0)
         if self.canary_url:
             self.scheduler.add_job(self.run_canary_test, "cron", day_of_week="tue", hour=3, minute=0)
+        if self.channel_check_interval_mins > 0:
+            self.scheduler.add_job(self.scan_tracked_channels, "interval", minutes=self.channel_check_interval_mins)
+        if self.instagram_receiver and getattr(self.instagram_receiver, "session_id", None):
+            self.scheduler.add_job(self.poll_instagram_dms, "interval", minutes=2)
         self.scheduler.start()
 
     def shutdown(self) -> None:

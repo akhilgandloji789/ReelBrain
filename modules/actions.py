@@ -45,6 +45,49 @@ class ActionHandler:
         self.db.log_action(reel_id, "code", {"snippets": snippets})
         return "\n".join(lines)
 
+    def get_reel_summary_html(self, reel_id: int) -> str:
+        reel = self.db.get_reel_by_id(reel_id)
+        if not reel:
+            return "⚠️ Reel not found."
+
+        safe_title = html.escape(reel.get("title") or "Untitled Reel")
+        safe_tldr = html.escape(reel.get("raw_transcript") or "No transcript available.")
+        user_intent = reel.get("user_intent")
+        intent_block = ""
+        if user_intent:
+            if user_intent.startswith("Radar:"):
+                intent_block = f"📡 <b>{html.escape(user_intent)}</b>\n\n"
+            elif user_intent.startswith("Instagram DM"):
+                intent_block = f"📥 <b>{html.escape(user_intent)}</b>\n\n"
+            else:
+                intent_block = f"💡 <b>Why You Saved This:</b> {html.escape(user_intent)}\n\n"
+
+        entities = self.db.get_entities(reel_id)
+        entity_lines = []
+        for e in entities:
+            total_sec = int(round(e.get("start_ts", 0.0)))
+            m = total_sec // 60
+            s = total_sec % 60
+            ts_str = f"{m:02d}:{s:02d}"
+            entity_lines.append(f"• {html.escape(e['text'])} <i>(⏱️ {ts_str})</i>")
+
+        if len(entity_lines) > 15:
+            remaining = len(entity_lines) - 15
+            entity_lines = entity_lines[:15]
+            entity_lines.append(f"<i>... and {remaining} more evidence points</i>")
+
+        body_block = "\n".join(entity_lines) if entity_lines else "<i>No evidence items recorded.</i>"
+        safe_url = html.escape(reel.get("url") or "#")
+
+        return (
+            f"🎬 <b>{safe_title}</b>\n\n"
+            f"{intent_block}"
+            f"📌 <b>TL;DR:</b>\n{safe_tldr}\n\n"
+            f"⚡ <b>Key Evidence & Steps:</b>\n{body_block}\n\n"
+            f"🏷️ <i>#{reel.get('category', 'other')}</i>\n\n"
+            f'🔗 <b>Original Reel:</b> <a href="{safe_url}">{safe_url}</a>'
+        )
+
     def record_feedback(self, reel_id: int, thumb: str) -> str:
         action_type = "feedback_thumb_up" if thumb == "up" else "feedback_thumb_down"
         self.db.log_action(reel_id, action_type, {"vote": thumb})

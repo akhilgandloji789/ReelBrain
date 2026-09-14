@@ -15,6 +15,43 @@ def unpack_vector(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{count}f", blob))
 
 
+def clean_handle(handle: str) -> str:
+    h = handle.strip()
+    if "/" in h:
+        h = h.split("?")[0].rstrip("/")
+        parts = [p for p in h.split("/") if p and "instagram.com" not in p and "instagr.am" not in p and "http" not in p]
+        if parts:
+            h = parts[-1]
+    return h.lstrip("@").lower()
+
+
+CATEGORY_ALIASES: dict[str, str] = {
+    "recipe": "recipe",
+    "recipes": "recipe",
+    "food": "recipe",
+    "cooking": "recipe",
+    "tech": "tech",
+    "technology": "tech",
+    "ai": "tech",
+    "code": "tech",
+    "coding": "tech",
+    "workout": "workout",
+    "fitness": "workout",
+    "gym": "workout",
+    "exercise": "workout",
+    "idea": "idea",
+    "ideas": "idea",
+    "book": "idea",
+    "books": "idea",
+    "travel": "travel",
+    "trip": "travel",
+    "finance": "finance",
+    "money": "finance",
+    "other": "other",
+    "all": "all",
+}
+
+
 class ReelDatabase:
     def __init__(self, db_path: Path | str = Path("data/reelminds.db")):
         self.db_path = Path(db_path)
@@ -76,6 +113,22 @@ class ReelDatabase:
                     action_type TEXT NOT NULL,
                     payload     TEXT,
                     created_at  TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS tracked_channels (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    handle          TEXT UNIQUE NOT NULL,
+                    added_at        TEXT NOT NULL,
+                    last_checked_at TEXT,
+                    last_shortcode  TEXT,
+                    is_active       INTEGER DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS processed_dms (
+                    mid             TEXT PRIMARY KEY,
+                    sender_id       TEXT,
+                    url             TEXT,
+                    processed_at    TEXT NOT NULL
                 );
             """)
             conn.commit()
@@ -287,3 +340,104 @@ class ReelDatabase:
             )
             conn.commit()
             return cursor.rowcount
+
+    def add_tracked_channel(self, handle: str) -> bool:
+        clean = clean_handle(handle)
+        if not clean:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tracked_channels (handle, added_at, is_active)
+                VALUES (?, ?, 1)
+                ON CONFLICT(handle) DO UPDATE SET is_active = 1
+                """,
+                (clean, now)
+            )
+            conn.commit()
+            return True
+
+    def remove_tracked_channel(self, handle: str) -> bool:
+        clean = clean_handle(handle)
+        if not clean:
+            return False
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE tracked_channels SET is_active = 0 WHERE handle = ? AND is_active = 1",
+                (clean,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_tracked_channels(self, active_only: bool = True) -> list[dict[str, Any]]:
+        with self._get_connection() as conn:
+            if active_only:
+                cursor = conn.execute("SELECT * FROM tracked_channels WHERE is_active = 1 ORDER BY handle ASC")
+            else:
+                cursor = conn.execute("SELECT * FROM tracked_channels ORDER BY handle ASC")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_tracked_channel(self, handle: str) -> dict[str, Any] | None:
+        clean = clean_handle(handle)
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM tracked_channels WHERE handle = ?", (clean,)).fetchone()
+            return dict(row) if row else None
+
+    def update_channel_last_checked(self, handle: str, last_shortcode: str | None = None) -> None:
+        clean = clean_handle(handle)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            if last_shortcode:
+                conn.execute(
+                    "UPDATE tracked_channels SET last_checked_at = ?, last_shortcode = ? WHERE handle = ?",
+                    (now, last_shortcode, clean)
+                )
+            else:
+                conn.execute(
+                    "UPDATE tracked_channels SET last_checked_at = ? WHERE handle = ?",
+                    (now, clean)
+                )
+            conn.commit()
+
+    def is_dm_processed(self, mid: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT 1 FROM processed_dms WHERE mid = ?", (mid,))
+            return cursor.fetchone() is not None
+
+    def record_processed_dm(self, mid: str, sender_id: str | None = None, url: str | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO processed_dms (mid, sender_id, url, processed_at) VALUES (?, ?, ?, ?)",
+                (mid, sender_id, url, now)
+            )
+            conn.commit()
+
+    def get_category_counts(self) -> dict[str, int]:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT LOWER(category) as category, COUNT(*) as count FROM reels WHERE status = 'COMPLETED' GROUP BY LOWER(category)"
+            )
+            return {row["category"]: row["count"] for row in cursor.fetchall()}
+
+    def get_reels_by_category(self, category: str | None = None, limit: int = 5, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        with self._get_connection() as conn:
+            raw_cat = (category or "").strip().lstrip("#").lower()
+            cat_clean = CATEGORY_ALIASES.get(raw_cat, raw_cat)
+            if not cat_clean or cat_clean == "all":
+                total = conn.execute("SELECT COUNT(*) FROM reels WHERE status = 'COMPLETED'").fetchone()[0]
+                cursor = conn.execute(
+                    "SELECT * FROM reels WHERE status = 'COMPLETED' ORDER BY saved_at DESC, id DESC LIMIT ? OFFSET ?",
+                    (limit, offset)
+                )
+            else:
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM reels WHERE status = 'COMPLETED' AND LOWER(category) = ?",
+                    (cat_clean,)
+                ).fetchone()[0]
+                cursor = conn.execute(
+                    "SELECT * FROM reels WHERE status = 'COMPLETED' AND LOWER(category) = ? ORDER BY saved_at DESC, id DESC LIMIT ? OFFSET ?",
+                    (cat_clean, limit, offset)
+                )
+            return [dict(row) for row in cursor.fetchall()], total

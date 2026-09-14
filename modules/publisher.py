@@ -33,12 +33,22 @@ class TelegramPublisher:
 
         intent_block = ""
         if user_intent:
-            intent_block = f"💡 <b>Why You Saved This:</b> {html.escape(user_intent)}\n\n"
+            if user_intent.startswith("Radar:"):
+                intent_block = f"📡 <b>{html.escape(user_intent)}</b>\n\n"
+            elif user_intent.startswith("Instagram DM"):
+                intent_block = f"📥 <b>{html.escape(user_intent)}</b>\n\n"
+            else:
+                intent_block = f"💡 <b>Why You Saved This:</b> {html.escape(user_intent)}\n\n"
 
         entity_lines = []
         for e in analysis.entities:
             ts_str = format_timestamp(e.start_ts)
             entity_lines.append(f"• {html.escape(e.text)} <i>(⏱️ {ts_str})</i>")
+
+        if len(entity_lines) > 15:
+            remaining = len(entity_lines) - 15
+            entity_lines = entity_lines[:15]
+            entity_lines.append(f"<i>... and {remaining} more evidence points</i>")
 
         body_block = "\n".join(entity_lines)
         safe_url = html.escape(original_url)

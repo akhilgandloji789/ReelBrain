@@ -1,7 +1,7 @@
 # 🧠 ReelMind: Multimodal Personal AI Second Brain for Short-Form Video
 
 > **Turn saved Instagram Reels into auditable, queryable, actionable personal knowledge.**  
-> Built with Google Gemini 2.0 Flash, `models/gemini-embedding-001`, SQLite WAL + derived FTS5, and Telegram Bot API.
+> Built with Google Gemini 3.6 Flash (`gemini-3.6-flash`), `models/gemini-embedding-001`, SQLite WAL + derived FTS5, and Telegram Bot API.
 
 ---
 
@@ -45,7 +45,7 @@ Generic AI summarizers only produce surface-level text that nobody reads. **Reel
                                 [DOWNLOADED]
                                        │
                                        ▼
-                                 [ANALYZING] (Gemini 2.0 Flash Vision & Audio)
+                                 [ANALYZING] (Gemini 3.6 Flash Vision & Audio)
                                        │
                                        ▼
                                  [ANALYZED]
@@ -117,11 +117,17 @@ python main.py --url "https://www.instagram.com/reel/C-xyz123/ Try this for Sund
 | Command / Action | Description |
 |---|---|
 | **Share Reel URL** | Paste or share an Instagram Reel URL with optional note (e.g. `https://instagram.com/reel/... Try this for meal prep`). Bot parses intent, extracts evidence, and publishes formatted note. |
+| `/filter [topic]` | Interactive In-Group Topic Filter with counts (e.g. `[🍳 Recipes (5)]`, `[💻 Tech & AI (3)]`, `[📋 View All]`), paginated reel notes, and direct filtering (`/filter tech`, `/reels recipe`). |
+| `/topics` or `/reels` | Aliases for topic filtering across your saved knowledge base. |
+| `/track @handle` | Adds an Instagram creator to monitor on automated radar scan (e.g. `/track @hubermanlab`). |
+| `/untrack @handle` | Removes a creator from automated channel radar monitoring. |
+| `/tracked` | Lists all monitored creators and their last scan timestamps. |
+| `/check_now` | Triggers an immediate radar check of all tracked creator channels. |
 | `/ask <query>` | Conversational retrieval over your saved reels ("Ask My Memory"). Cites exact video timestamps and links original source. |
 | `/grocery <reel_id>` | Generates an interactive checklist of ingredients for recipes. |
 | `/code <reel_id>` | Extracts clean, copyable code snippets from tech tutorials. |
 | `/edit <id> <text>` | Corrects an extracted claim/ingredient and immediately triggers vector re-embedding. |
-| `/status` | Real-time health dashboard: uptime, processing latency, indexed reels, entities, and actions. |
+| `/status` | Real-time health dashboard: uptime, latency, indexed reels, entities, tracked creators, and ephemeral disk usage. |
 | `/canary` | On-demand proactive health check to verify yt-dlp, Gemini, and storage pipeline. |
 | `/export [md\|json]` | Sends downloadable Markdown or JSON archive of your entire second brain. |
 | **`[🛒 Grocery List]`** | 1-tap button on recipe notes for instant checklist generation. |
