@@ -337,7 +337,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if is_reel:
         status_msg = await update.message.reply_text("⏳ Processing reel... Analyzing video & audio with Gemini...")
         success, result_text, thread_id = await pipeline.process_url(text, user_id=user_id)
-        await status_msg.edit_text(result_text, parse_mode="HTML")
+        try:
+            await status_msg.edit_text(result_text, parse_mode="HTML")
+        except Exception:
+            try:
+                await status_msg.edit_text(html.escape(result_text), parse_mode="HTML")
+            except Exception:
+                await status_msg.edit_text(result_text)
     else:
         answer = search_engine.answer_conversational_query(text)
         await update.message.reply_text(answer, parse_mode="HTML")

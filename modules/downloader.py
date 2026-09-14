@@ -71,6 +71,12 @@ class Downloader:
             "no_warnings": True,
             "merge_output_format": "mp4",
         }
+        if self.session_id:
+            ydl_opts["http_headers"] = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "Cookie": f"sessionid={self.session_id};",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
         
         try:
             with YoutubeDL(ydl_opts) as ydl:
@@ -93,6 +99,19 @@ class Downloader:
                     
                 raise DownloadError(f"Video file not found after download for {url}")
         except Exception as e:
+            # Fallback: Attempt download via instagrapi if session is present
+            if self.session_id:
+                try:
+                    from instagrapi import Client as InstaClient
+                    cl = InstaClient()
+                    cl.login_by_sessionid(self.session_id)
+                    downloaded_file = cl.video_download_by_url(url, folder=out_path)
+                    if downloaded_file and Path(downloaded_file).exists():
+                        self._record_success()
+                        return Path(downloaded_file)
+                except Exception:
+                    pass
+
             self._record_failure()
             # Clean up any partial files created during failed download
             for pattern in ("*.part*", "*.ytdl", "*.temp*", "*.tmp*"):
@@ -101,7 +120,10 @@ class Downloader:
                         partial.unlink()
                     except Exception:
                         pass
-            raise DownloadError(f"Download failure on {url}: {str(e)}") from e
+            err_str = str(e)
+            if "empty media response" in err_str:
+                err_str = "Instagram requires login to access this media. Check or refresh INSTAGRAM_SESSION_ID."
+            raise DownloadError(f"Download failure on {url}: {err_str}") from e
 
     def get_channel_reels(self, handle: str, limit: int = 5) -> list[str]:
         clean_handle = handle.strip().lstrip("@")

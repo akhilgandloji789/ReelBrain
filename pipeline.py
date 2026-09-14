@@ -150,13 +150,17 @@ class ReelPipeline:
                 elapsed = time.time() - start_time
                 self.metrics.record_run(elapsed, success=True)
                 return True, f"✅ Indexed <b>{analysis.title}</b> under <i>#{analysis.category}</i> ({round(elapsed, 1)}s)", thread_id
-
             except Exception as e:
                 if reel_id:
                     self.db.update_reel_status(reel_id, "FAILED", error_message=str(e))
                 elapsed = time.time() - start_time
                 self.metrics.record_run(elapsed, success=False)
-                return False, f"⚠️ Failed to process reel: {str(e)}", None
+                clean_err = str(e)
+                if "empty media response" in clean_err or "LoginRequired" in clean_err or "requires login" in clean_err:
+                    clean_err = "Instagram session expired or post requires authentication. Please update INSTAGRAM_SESSION_ID."
+                elif "CircuitBreakerOpen" in clean_err:
+                    clean_err = "Downloader paused temporarily due to consecutive failures. Please try again in 2 minutes."
+                return False, f"⚠️ Failed to process reel: {clean_err}", None
 
             finally:
                 if getattr(self.settings, "CLEANUP_TEMP", True):
