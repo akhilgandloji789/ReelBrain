@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import html
 import logging
+import os
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
@@ -781,6 +782,35 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
+async def start_health_check_server(port: int) -> None:
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            await reader.read(1024)
+            body = b'{"status":"healthy","app":"ReelBrain"}\n'
+            response = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            writer.write(response)
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    try:
+        server = await asyncio.start_server(handle_client, "0.0.0.0", port)
+        logger.info(f"Health check HTTP server started on port {port}")
+    except Exception as e:
+        logger.warning(f"Failed to start health server on port {port}: {e}")
+
+
 def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: ActionHandler, settings: Settings) -> None:
     pipeline.startup_recovery()
 
@@ -795,6 +825,14 @@ def run_bot(pipeline: ReelPipeline, search_engine: SearchEngine, actions: Action
     scheduler_holder: dict[str, SchedulerService | None] = {"service": None}
 
     async def post_init(application) -> None:
+        port_env = os.environ.get("PORT")
+        if port_env:
+            try:
+                port = int(port_env)
+                asyncio.create_task(start_health_check_server(port))
+            except Exception as e:
+                logger.warning(f"Could not initialize health check port {port_env}: {e}")
+
         scheduler = SchedulerService(
             db=pipeline.db,
             bot=application.bot,
